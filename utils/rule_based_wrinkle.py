@@ -14,6 +14,7 @@
 
 import json
 import logging
+import math
 import time
 from datetime import datetime
 from pathlib import Path
@@ -24,14 +25,25 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# JSON 展示用的子图划分，与服务端 Dinomaly 版 fixed_crop 的 25 份划分语义对齐，
+# JSON 展示用的子图划分：全图宽度 25 等分，与 Dinomaly 版 fixed_crop 的全图划分语义对齐，
 # 仅用于 crop_results 字段兼容，不影响实际检测区域
-DISPLAY_CROP_START = 1500
-DISPLAY_CROP_SIZE = 1000
 DISPLAY_NUM_CROPS = 25
+
+# 规则参数的标定基准：产线原图 31901x1000 的图像高度。
+# 检测时按 实际高度/REF_HEIGHT 缩放全部绝对像素参数，使缩小图（如 500x500）同样可用
+REF_HEIGHT = 1000
 
 # 合成异常图的高斯平滑核（边缘柔化；1 表示不平滑）
 SMOOTH_KERNEL_SIZE = 31
+
+# 全图评分时剔除的首尾子图数（各 2 片，共 4 片），与 Dinomaly 版 exclude_edge_crops 对齐
+_EXCLUDED_EDGE_CROPS = 2
+
+
+def _odd(value: float, minimum: int = 3) -> int:
+    # cv2 的核尺寸/blockSize 必须为正奇数
+    v = max(int(round(value)), minimum)
+    return v if v % 2 == 1 else v + 1
 
 
 def min_max_norm(image: np.ndarray) -> np.ndarray:
@@ -59,7 +71,7 @@ class Cluster:
         self.centroid = (self.centroid * self.n_samples + new_point_arr) / (self.n_samples + 1)
         self.n_samples += 1
 
-    def distance(self, point: Sequence[float], l2: float = 0.5, l3: float = 0.1) -> float:
+    def distance(self, point: Sequence[float], l2: float = 0.5, l3: float = 0.2) -> float:
         pos_diff = np.linalg.norm(np.asarray(point[:2]) - self.centroid[:2])
         area_centroid = self.centroid[2] * self.centroid[3]
         area_point = point[2] * point[3]
@@ -103,8 +115,8 @@ class RuleBasedWrinkleCore:
 
     def __init__(
         self,
-        crop_start: int = 4000,
-        crop_width: int = 22000,
+        crop_start: int = 0,
+        crop_width: int = 10**9,
         min_height: int = 950,
         min_width: int = 20,
         max_width: int = 80,
@@ -112,6 +124,8 @@ class RuleBasedWrinkleCore:
         max_angle_dev: float = 30.0,
         clustering_threshold: float = 50.0,
     ):
+        # 所有构造参数均为 REF_HEIGHT 分辨率下的标定值，detect() 内按图片高度等比缩放。
+        # crop_start=0 + 足够大的 crop_width 表示全图检测（detect 内有 min(x2, w) 保护）
         self.crop_start = crop_start
         self.crop_width = crop_width
         self.min_height = min_height
@@ -121,18 +135,18 @@ class RuleBasedWrinkleCore:
         self.max_angle_dev = max_angle_dev
         self.clustering_threshold = clustering_threshold
 
-    def preprocess(self, image: np.ndarray) -> np.ndarray:
-        blurred = cv2.medianBlur(image, 5)
+    def preprocess(self, image: np.ndarray, scale: float = 1.0) -> np.ndarray:
+        blurred = cv2.medianBlur(image, _odd(5 * scale))
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(blurred)
         binary = cv2.adaptiveThreshold(
             enhanced, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
-            cv2.THRESH_BINARY, blockSize=201, C=25
+            cv2.THRESH_BINARY, blockSize=_odd(201 * scale, minimum=5), C=25
         )
         binary_inv = cv2.bitwise_not(binary)
-        v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 15))
+        v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, _odd(15 * scale)))
         refined = cv2.morphologyEx(binary_inv, cv2.MORPH_CLOSE, v_kernel)
-        h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (_odd(3 * scale), _odd(3 * scale)))
         refined = cv2.morphologyEx(refined, cv2.MORPH_OPEN, h_kernel)
         return refined
 
@@ -152,12 +166,12 @@ class RuleBasedWrinkleCore:
         return rw, rh, angle
 
     @staticmethod
-    def _calculate_severity(width: float, height: float, aspect_ratio: float) -> int:
+    def _calculate_severity(width: float, height: float, aspect_ratio: float, scale: float = 1.0) -> int:
         width_score = 1.0
-        if width > 45: width_score = 5.0
-        elif width > 35: width_score = 4.0
-        elif width > 25: width_score = 3.0
-        elif width > 18: width_score = 2.0
+        if width > 45 * scale: width_score = 5.0
+        elif width > 35 * scale: width_score = 4.0
+        elif width > 25 * scale: width_score = 3.0
+        elif width > 18 * scale: width_score = 2.0
 
         ratio_score = 1.0
         if aspect_ratio > 12: ratio_score = 5.0
@@ -168,12 +182,12 @@ class RuleBasedWrinkleCore:
         avg_score = (width_score + ratio_score) / 2
         return min(5, max(1, int(round(avg_score))))
 
-    def _calculate_confidence(self, width, height, angle_error, aspect_ratio) -> float:
+    def _calculate_confidence(self, width, height, angle_error, aspect_ratio, scale: float = 1.0) -> float:
         confidence = 0.5
-        if self.min_width <= width <= self.max_width: confidence += 0.2
-        elif width > self.max_width: confidence -= 0.1
-        if height > self.min_height * 1.5: confidence += 0.15
-        elif height > self.min_height: confidence += 0.1
+        if self.min_width * scale <= width <= self.max_width * scale: confidence += 0.2
+        elif width > self.max_width * scale: confidence -= 0.1
+        if height > self.min_height * scale * 1.5: confidence += 0.15
+        elif height > self.min_height * scale: confidence += 0.1
         if angle_error <= 5: confidence += 0.1
         elif angle_error <= self.max_angle_dev: confidence += 0.05
         if aspect_ratio > self.min_ratio * 1.5: confidence += 0.1
@@ -183,13 +197,19 @@ class RuleBasedWrinkleCore:
     def detect(self, gray: np.ndarray) -> List[Dict]:
         """输入全图灰度图，返回全图坐标系的褶皱列表（dict 含合成异常图用的 contours）"""
         h, w = gray.shape[:2]
-        x1, x2 = self.crop_start, min(self.crop_start + self.crop_width, w)
+        scale = h / REF_HEIGHT
+        x1 = int(round(self.crop_start * scale))
+        x2 = min(x1 + int(round(self.crop_width * scale)), w)
         in_roi = x1 < w
         roi_img = gray[:, x1:x2] if in_roi else gray
         x_offset = x1 if in_roi else 0
 
-        binary_roi = self.preprocess(roi_img)
+        binary_roi = self.preprocess(roi_img, scale)
         contours, _ = cv2.findContours(binary_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        min_width = self.min_width * scale
+        max_width = self.max_width * scale
+        min_height = self.min_height * scale
 
         candidates: List[Tuple[List[float], np.ndarray]] = []
         for cnt in contours:
@@ -198,7 +218,7 @@ class RuleBasedWrinkleCore:
             angle_error = abs(angle)
             if angle_error > self.max_angle_dev:
                 continue
-            if rw < self.min_width or rw > self.max_width or rh < self.min_height:
+            if rw < min_width or rw > max_width or rh < min_height:
                 continue
             if (rh / (rw + 1e-5)) < self.min_ratio:
                 continue
@@ -207,7 +227,7 @@ class RuleBasedWrinkleCore:
             cnt_shifted = cnt + np.array([x_offset, 0], dtype=cnt.dtype) if x_offset else cnt
             candidates.append(([global_cx, rect[0][1], rw, rh, angle], cnt_shifted))
 
-        clustering = SinglePassClustering(threshold=self.clustering_threshold)
+        clustering = SinglePassClustering(threshold=self.clustering_threshold * scale)
         for features, cnt in candidates:
             clustering.add_point(features, cnt)
 
@@ -223,8 +243,8 @@ class RuleBasedWrinkleCore:
                 "width": width,
                 "length": height,
                 "angle": float(angle),
-                "confidence": self._calculate_confidence(width, height, abs(angle), aspect_ratio),
-                "severity": self._calculate_severity(width, height, aspect_ratio),
+                "confidence": self._calculate_confidence(width, height, abs(angle), aspect_ratio, scale),
+                "severity": self._calculate_severity(width, height, aspect_ratio, scale),
                 "bbox": (
                     float(cx - width / 2), float(cy - height / 2),
                     float(cx + width / 2), float(cy + height / 2),
@@ -242,16 +262,29 @@ class RuleBasedWrinklePipeline:
         self.detector = detector or RuleBasedWrinkleCore()
 
     def _get_anomaly_level(self, score: float) -> str:
-        if score < self.threshold:
+        if score <= self.threshold:
             return "很可能正常"
         return "很可能异常"
 
     def _calculate_analog_voltage(self, score: float) -> float:
-        if score < self.threshold:
+        if score <= self.threshold:
             return 0.0
         normalized_score = (score - self.threshold) / (1.0 - self.threshold)
         normalized_score = min(max(normalized_score, 0.0), 1.0)
         return normalized_score * 5.0
+
+    def _overall_score(self, wrinkles: List[Dict], img_width: int) -> float:
+        """全图异常分数：只统计中间 21 片（crop 2..22）内的褶皱，与 Dinomaly 版
+        exclude_edge_crops=2 的评分语义对齐；边缘片仍检出并展示，但不驱动全图判定"""
+        if not wrinkles:
+            return 0.0
+        crop_size = math.ceil(img_width / DISPLAY_NUM_CROPS)
+        edge = _EXCLUDED_EDGE_CROPS
+        center = [
+            wrinkle for wrinkle in wrinkles
+            if edge <= int(wrinkle["cx"] // crop_size) < DISPLAY_NUM_CROPS - edge
+        ]
+        return max((wrinkle["confidence"] for wrinkle in center), default=0.0)
 
     def _compose_anomaly_map(self, map_shape: Tuple[int, int], wrinkles: List[Dict]) -> np.ndarray:
         canvas = np.zeros(map_shape, dtype=np.uint8)
@@ -267,19 +300,21 @@ class RuleBasedWrinklePipeline:
         normalized = min_max_norm(smoothed.astype(np.float32))
         return (normalized * 255).astype(np.uint8)
 
-    def _build_crop_results(self, wrinkles: List[Dict], img_height: int) -> List[Dict]:
+    def _build_crop_results(self, wrinkles: List[Dict], img_width: int, img_height: int) -> List[Dict]:
+        crop_size = math.ceil(img_width / DISPLAY_NUM_CROPS)
         crop_scores = [0.0] * DISPLAY_NUM_CROPS
         for wrinkle in wrinkles:
-            crop_index = int((wrinkle["cx"] - DISPLAY_CROP_START) // DISPLAY_CROP_SIZE)
+            crop_index = int(wrinkle["cx"] // crop_size)
             if 0 <= crop_index < DISPLAY_NUM_CROPS:
                 crop_scores[crop_index] = max(crop_scores[crop_index], wrinkle["confidence"])
 
         crop_results = []
         for index, score in enumerate(crop_scores):
-            x_start = DISPLAY_CROP_START + index * DISPLAY_CROP_SIZE
+            x_start = index * crop_size
+            x_end = min(x_start + crop_size, img_width)
             crop_results.append({
                 "crop_id": index,
-                "position": [x_start, 0, x_start + DISPLAY_CROP_SIZE, img_height],
+                "position": [x_start, 0, x_end, img_height],
                 "sample_score": score,
                 "anomaly_level": self._get_anomaly_level(score),
             })
@@ -330,7 +365,7 @@ class RuleBasedWrinklePipeline:
         cv2.imwrite(str(anomaly_map_path), anomaly_map)
         cv2.imwrite(str(heatmap_path), cvt2heatmap(anomaly_map))
 
-        overall_score = max((wrinkle["confidence"] for wrinkle in wrinkles), default=0.0)
+        overall_score = self._overall_score(wrinkles, img_width)
         result_data = {
             "process_id": process_id,
             "processing_mode": "rule_based",
@@ -341,7 +376,7 @@ class RuleBasedWrinklePipeline:
             "original_size": [img_width, img_height],
             "num_crops": DISPLAY_NUM_CROPS,
             "timestamp": datetime.now().isoformat(),
-            "crop_results": self._build_crop_results(wrinkles, img_height),
+            "crop_results": self._build_crop_results(wrinkles, img_width, img_height),
             "files": {
                 "anomaly_map": anomaly_map_path.name,
                 "heatmap": heatmap_path.name,

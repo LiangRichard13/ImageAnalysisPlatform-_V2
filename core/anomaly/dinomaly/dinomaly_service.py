@@ -185,17 +185,17 @@ class AnomalyProcessorService:
         return prediction_path.exists() and heatmap_path.exists() and json_path.exists()
 
     def _get_anomaly_level(self, score: float) -> str:
-        if score < self.threshold:
+        if score <= self.threshold:
             return "很可能正常"
         return "很可能异常"
 
     def _get_overall_anomaly_level(self, scores: Sequence[float]) -> str:
-        if any(score >= self.threshold for score in scores):
+        if any(score > self.threshold for score in scores):
             return "很可能异常"
         return "很可能正常"
 
     def _calculate_analog_voltage(self, score: float) -> float:
-        if score < self.threshold:
+        if score <= self.threshold:
             return 0.0
         normalized_score = (score - self.threshold) / (1.0 - self.threshold)
         normalized_score = min(max(normalized_score, 0.0), 1.0)

@@ -132,17 +132,17 @@ class DinomalyEngine:
     # ---------- 判定（与服务器版公式一致） ----------
 
     def _get_anomaly_level(self, score: float) -> str:
-        if score < self.threshold:
+        if score <= self.threshold:
             return "很可能正常"
         return "很可能异常"
 
     def _get_overall_anomaly_level(self, scores) -> str:
-        if any(score >= self.threshold for score in scores):
+        if any(score > self.threshold for score in scores):
             return "很可能异常"
         return "很可能正常"
 
     def _calculate_analog_voltage(self, score: float) -> float:
-        if score < self.threshold:
+        if score <= self.threshold:
             return 0.0
         normalized_score = (score - self.threshold) / (1.0 - self.threshold)
         normalized_score = min(max(normalized_score, 0.0), 1.0)
@@ -155,25 +155,21 @@ class DinomalyEngine:
         height, width = image_np.shape[:2]
         channels = 1 if len(image_np.shape) == 2 else image_np.shape[2]
 
-        crop_start = 1500
-        crop_width = 25000
-        center_cropped = image_np[:, crop_start:crop_start + crop_width]
-        center_cropped_height, _ = center_cropped.shape[:2]
+        # 全图 25 等分：不丢弃两端；宽度不能整除时尾片收窄（x_end 兜底到图宽）
+        num_sub_images = 25
+        sub_image_size = math.ceil(width / num_sub_images)
 
         crops = []
-        sub_image_size = 1000
-        num_sub_images = 25
         for index in range(num_sub_images):
             x_start = index * sub_image_size
-            x_end = x_start + sub_image_size
-            sub_image = center_cropped[:, x_start:x_end]
+            x_end = min(x_start + sub_image_size, width)
+            sub_image = image_np[:, x_start:x_end]
             if channels == 1:
                 sub_image_pil = Image.fromarray(sub_image, mode="L")
             else:
                 sub_image_pil = Image.fromarray(sub_image, mode="RGB")
 
-            original_x = crop_start + x_start
-            position = (original_x, 0, original_x + sub_image_size, center_cropped_height)
+            position = (x_start, 0, x_end, height)
             crops.append((sub_image_pil, position))
 
         return crops

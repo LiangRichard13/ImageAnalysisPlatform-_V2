@@ -151,7 +151,7 @@ python anomaly_detection_tab.py    # 异常检测
 
 ### 功能特性
 - **多模块集成**：统一的主窗口管理。
-- **SSH远程处理**：通过SSH连接远程服务器。
+- **本地进程内处理**：算法引擎全部在本地运行，无需网络连接。
 - **自动文件管理**：临时文件自动清理。
 - **错误处理**：完善的异常处理和用户提示。
 - **进度显示**：实时进度条和状态更新。
@@ -172,11 +172,11 @@ python anomaly_detection_tab.py    # 异常检测
 pip install -r requirements.txt
 ```
 
-### SSH配置
-确保 `.env` 文件包含正确的SSH连接信息：
-- **SSH服务器地址和端口**：例如 `ssh.example.com:22`。
-- **用户名和密码**：例如 `username` 和 `password`。
-- **远程路径配置**：例如 `/path/to/remote/directory`。
+### 模型权重配置
+默认从 `core/` 下对应方法目录的 `weights/` 加载，一般无需配置。如需自定义，在 `.env` 文件中设置：
+- **ANOMALY_MODEL_PATH**：异常检测模型权重路径。
+- **TREND_MODEL_PATH**：趋势预测模型权重路径。
+- **DOWNLOAD_ROOT_DIR**：结果输出根目录（默认 `download/`）。
 
 ### 在线批处理配置
 在 `.env` 文件中添加：
@@ -192,13 +192,12 @@ pip install -r requirements.txt
 
 ### 故障排除
 - **查看底部日志区域**：了解详细的错误信息。
-- **确保SSH连接配置正确**：检查 `.env` 文件中的配置。
-- **检查网络连接状态**：确保网络连接稳定。
+- **确认模型权重存在**：检查 `core/` 下对应方法目录的 `weights/` 是否完整。
 - **验证图片格式**：确保图片格式为jpg、jpeg、png、bmp、gif、tiff。
 - **批处理文件夹权限**：确保监控文件夹存在且有读写权限。
 
 ### 性能优化
-- **建议使用本地网络环境**：提高处理速度。
+- **有 NVIDIA GPU 时安装对应 CUDA 版本的 torch**：显著提升深度学习引擎速度。
 - **大图片处理可能需要较长时间**：耐心等待处理完成。
 - **定期清理下载目录中的结果文件**：释放存储空间。
 - **批处理检查点管理**：定期清理旧的检查点文件。
@@ -210,10 +209,13 @@ analysis_system/
 ├── main_window.py              # 主窗口入口，负责整体界面管理和功能切换。
 ├── film_trend_analysis_tab.py  # 镀膜褶皱趋势预测模块，处理多张图片的褶皱趋势分析。
 ├── anomaly_detection_tab.py    # 异常检测模块，检测单张图片中的异常区域。
+├── core/                       # 算法核心：趋势预测、异常检测（本地进程内引擎）。
+│   ├── trend/                  # 趋势预测服务（PredGRU）。
+│   └── anomaly/                # 异常检测服务（Dinomaly 深度学习 + 规则化褶皱检测）。
 ├── utils/                      # 工具模块，包含各种辅助功能。
-│   ├── ssh_client_film_trend_analysis.py  # 用于镀膜褶皱趋势预测的SSH客户端。
-│   ├── ssh_client_anomaly_detection.py    # 用于异常检测的SSH客户端。
-│   └── file_namer.py                        # 文件命名工具。
+│   ├── trend_analysis_client.py       # 趋势预测客户端（本地进程内）。
+│   ├── anomaly_detection_client.py    # 异常检测客户端（本地进程内，双引擎）。
+│   └── file_namer.py                  # 文件命名工具。
 ├── download/                   # 结果下载目录，存放处理后的结果图片。
 ├── temp/                       # 临时文件目录，存放临时文件。
 │   └── batch_processing_checkpoint/  # 批处理检查点文件目录

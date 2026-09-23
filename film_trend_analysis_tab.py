@@ -50,10 +50,10 @@ class ImageProcessingThread(QThread):
                 shutil.copy2(image_path, dest_path)
                 self.progress.emit(f"正在准备图片 {i+1}/{len(self.image_paths)}: {filename}")
             
-            # 调用SSH客户端处理图片
-            self.progress.emit("正在连接远程服务器...")
+            # 调用本地趋势预测客户端处理图片
+            self.progress.emit("正在初始化本地趋势预测引擎...")
             client = TrendAnalysisClient()
-            self.progress.emit("正在上传图片到远程服务器...")
+            self.progress.emit("正在进行趋势预测...")
             result_path, local_result_json = client.process_images(temp_dir)
             
             # 清理临时目录
