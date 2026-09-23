@@ -1,0 +1,29 @@
+# ---- Python 运行产物 ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ---- 模型权重（大文件，另行管理） ----
+*.pth
+*.ckpt
+*.pt
+*.pkl
+core/anomaly/dinomaly/weights/
+core/trend/weights/
+
+# ---- 运行输出与临时文件 ----
+download/
+temp/
+_smoke_test/
+
+# ---- 历史检测数据留档（76MB，如需入仓库删除此行） ----
+core/results/
+
+# ---- 本地配置（含 SSH 密码等敏感信息，禁止入库） ----
+.env
+
+# ---- IDE / 系统 ----
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

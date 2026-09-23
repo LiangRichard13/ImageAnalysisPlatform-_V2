@@ -1,0 +1,20 @@
+# 分析系统依赖清单
+# 【基础组】界面 + 规则化异常检测（默认引擎，只需这一组即可运行）
+PyQt5
+python-dotenv
+opencv-python>=4.5
+numpy>=1.21
+
+# 【完整组】深度学习引擎（Dinomaly 异常检测 + PredGRU 趋势预测）
+# 无 NVIDIA GPU 的机器先执行（CPU 版 torch）：
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# 有 GPU 的机器按 CUDA 版本从 pytorch.org 安装对应 torch/torchvision
+torch
+torchvision
+torchinfo
+timm
+scikit-learn
+scipy
+pandas
+matplotlib
+pillow
