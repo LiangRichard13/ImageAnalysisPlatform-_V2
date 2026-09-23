@@ -26,13 +26,14 @@ sys.path.append(os.path.join(os.path.dirname(os.path.dirname(project_root)), "al
 from models.dinomaly import Dinomaly
 from utils_ import cal_anomaly_maps, get_gaussian_kernel, min_max_norm, cvt2heatmap
 
-# 默认路径配置
-DEFAULT_ANOMALY_INPUT_DIR = str("/run/user/1000/gvfs/smb-share:server=192.168.9.33,share=pictures/anomaly_api/input")
-DEFAULT_ANOMALY_OUTPUT_DIR = str("/run/user/1000/gvfs/smb-share:server=192.168.9.33,share=pictures/anomaly_api/output")
-DEFAULT_ANOMALY_MODEL_PATH = "/home/zentek/lixiang/Pruning/Adam-NSCL-main-randinit-l2p-dataset/train/checkpoints/coating_anomaly_final.pth"
+# 默认路径配置（本地运行：脚本目录下的 input/output/weights）
+_DEFAULT_DIR = Path(__file__).resolve().parent
+DEFAULT_ANOMALY_INPUT_DIR = str(_DEFAULT_DIR / "input")
+DEFAULT_ANOMALY_OUTPUT_DIR = str(_DEFAULT_DIR / "output")
+DEFAULT_ANOMALY_MODEL_PATH = str(_DEFAULT_DIR / "weights" / "coating_anomaly_final.pth")
 
 
-LOGGER = logging.getLogger("anomaly_share_dir_service")
+LOGGER = logging.getLogger("anomaly_service")
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
 
@@ -494,22 +495,6 @@ def main() -> None:
     setup_logging()
     parser = build_argument_parser()
     args = parser.parse_args()
-
-    # 解析输入目录
-    if args.input_dir == str(Path(__file__).resolve().parent / "input"):
-        input_path_env = os.getenv("share_dir_anomaly_detection_input_path") or os.getenv("SHARE_DIR_ANOMALY_DETECTION_INPUT_DIR")
-        if input_path_env:
-            args.input_dir = input_path_env if Path(input_path_env).is_absolute() else str(Path(project_root) / input_path_env)
-        else:
-            args.input_dir = DEFAULT_ANOMALY_INPUT_DIR
-
-    # 解析输出目录
-    if args.output_dir == str(Path(__file__).resolve().parent / "output"):
-        output_path_env = os.getenv("share_dir_anomaly_detection_output_path") or os.getenv("SHARE_DIR_ANOMALY_DETECTION_OUTPUT_DIR")
-        if output_path_env:
-            args.output_dir = output_path_env if Path(output_path_env).is_absolute() else str(Path(project_root) / output_path_env)
-        else:
-            args.output_dir = DEFAULT_ANOMALY_OUTPUT_DIR
 
     model_path = args.model_path or os.getenv("ANOMALY_MODEL_PATH") or DEFAULT_ANOMALY_MODEL_PATH
 

@@ -113,7 +113,6 @@ class DataProcess:
         frames_np = []
 
         print('loading data from', data_dir)  
-        data_dir = '/home/zentek/wry/silicon/datasets/test'
         filenames = os.listdir(data_dir)
 
         # new4

@@ -11,7 +11,7 @@ import os
 
 _logger = logging.getLogger(__name__)
 
-_WEIGHTS_DIR = "backbones/weights"
+_WEIGHTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backbones", "weights")
 os.makedirs(_WEIGHTS_DIR, exist_ok=True)
 
 
@@ -43,7 +43,7 @@ def load(name):
 
                 if arch == "base":
                     # 使用本地权重文件
-                    local_weight_path = "/home/zentek/lixiang/Pruning/Adam-NSCL-main-randinit-l2p-dataset/backbones/weights/dinov2_vitb14_reg4_pretrain.pth"
+                    local_weight_path = os.path.join(_WEIGHTS_DIR, "dinov2_vitb14_reg4_pretrain.pth")
                     if os.path.exists(local_weight_path):
                         ckpt_pth = local_weight_path
                         # print(f"使用本地权重文件: {ckpt_pth}")

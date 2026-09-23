@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """基于规则的膜面褶皱检测共享目录服务
 
-与 share_dir_service_anomaly.py (Dinomaly 深度学习版) 的输入输出契约完全一致：
+与 dinomaly_service.py（Dinomaly 深度学习版）的输入输出契约完全一致：
   input/{process_id}/           ← 工控端投递（request.json + 图像）
   output/{process_id}/*.png|json ← 本服务写出三件套
 差异仅在推理引擎：预处理 + 轮廓 + 几何规则 + 单遍聚类（仅依赖 cv2 + numpy）。
@@ -28,11 +28,12 @@ import numpy as np
 project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(project_root)
 
-# 默认路径配置（与 Dinomaly 版保持一致）
-DEFAULT_ANOMALY_INPUT_DIR = str("/run/user/1000/gvfs/smb-share:server=192.168.9.33,share=pictures/anomaly_api/input")
-DEFAULT_ANOMALY_OUTPUT_DIR = str("/run/user/1000/gvfs/smb-share:server=192.168.9.33,share=pictures/anomaly_api/output")
+# 默认路径配置（本地运行：脚本目录下的 input/output）
+_DEFAULT_DIR = Path(__file__).resolve().parent
+DEFAULT_ANOMALY_INPUT_DIR = str(_DEFAULT_DIR / "input")
+DEFAULT_ANOMALY_OUTPUT_DIR = str(_DEFAULT_DIR / "output")
 
-LOGGER = logging.getLogger("anomaly_share_dir_service_rule")
+LOGGER = logging.getLogger("anomaly_rule_service")
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
 # JSON 展示用的子图划分，与 Dinomaly 版 fixed_crop 的 25 份划分语义对齐，
@@ -580,23 +581,7 @@ def main() -> None:
         run_single_image(args)
         return
 
-    # 解析输入目录（与 Dinomaly 版相同的 env 名）
-    if args.input_dir == str(Path(__file__).resolve().parent / "input"):
-        input_path_env = os.getenv("share_dir_anomaly_detection_input_path") or os.getenv("SHARE_DIR_ANOMALY_DETECTION_INPUT_DIR")
-        if input_path_env:
-            args.input_dir = input_path_env if Path(input_path_env).is_absolute() else str(Path(project_root) / input_path_env)
-        else:
-            args.input_dir = DEFAULT_ANOMALY_INPUT_DIR
-
-    # 解析输出目录
-    if args.output_dir == str(Path(__file__).resolve().parent / "output"):
-        output_path_env = os.getenv("share_dir_anomaly_detection_output_path") or os.getenv("SHARE_DIR_ANOMALY_DETECTION_OUTPUT_DIR")
-        if output_path_env:
-            args.output_dir = output_path_env if Path(output_path_env).is_absolute() else str(Path(project_root) / output_path_env)
-        else:
-            args.output_dir = DEFAULT_ANOMALY_OUTPUT_DIR
-
-    detector = build_detector(args)
+        detector = build_detector(args)
     service = AnomalyProcessorService(
         detector=detector,
         input_dir=args.input_dir,

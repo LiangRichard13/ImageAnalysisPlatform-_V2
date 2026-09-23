@@ -1,6 +1,6 @@
 """规则化褶皱检测管线（进程内版本）
 
-从 a100_server/share_dir_service_anomaly_rule.py 移植的检测核心与产物合成逻辑，
+从 core/anomaly/rule_based/rule_based_service.py 移植的检测核心与产物合成逻辑，
 供工控软件直接调用，取消共享目录/网络通信环节。
 
 对外接口：

@@ -25,10 +25,11 @@ from a100_utils import preprocess
 from a100_utils.eval_bbox import IoU
 from preprocess.tojson import hough, calculate_voltage_from_slope
 
-# 默认路径配置
-DEFAULT_TREND_INPUT_DIR = str("/run/user/1000/gvfs/smb-share:server=192.168.9.33,share=pictures/trend_api/input")
-DEFAULT_TREND_OUTPUT_DIR = str("/run/user/1000/gvfs/smb-share:server=192.168.9.33,share=pictures/trend_api/output")
-DEFAULT_TREND_MODEL_PATH = "/home/zentek/wry/silicon/models/checkpoints-ontonet-3-weighted+sobel-model-best-2894.ckpt"
+# 默认路径配置（本地运行：脚本目录下的 input/output/weights）
+_DEFAULT_DIR = Path(__file__).resolve().parent
+DEFAULT_TREND_INPUT_DIR = str(_DEFAULT_DIR / "input")
+DEFAULT_TREND_OUTPUT_DIR = str(_DEFAULT_DIR / "output")
+DEFAULT_TREND_MODEL_PATH = str(_DEFAULT_DIR / "weights" / "checkpoints-ontonet-3-weighted+sobel-model-best-2894.ckpt")
 
 LOGGER = logging.getLogger("trend_api")
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
@@ -430,21 +431,9 @@ def main() -> None:
     parser = build_argument_parser()
     args = parser.parse_args()
 
-    # 解析输入目录
-    if args.input_dir == str(Path(__file__).resolve().parent / "input"):
-        input_path_env = os.getenv("share_dir_trend_analysis_input_path") or os.getenv("SHARE_DIR_TREND_ANALYSIS_INPUT_DIR")
-        if input_path_env:
-            args.input_dir = input_path_env if Path(input_path_env).is_absolute() else str(Path(project_root) / input_path_env)
-        else:
-            args.input_dir = DEFAULT_TREND_INPUT_DIR
-
-    # 解析输出目录
-    if args.output_dir == str(Path(__file__).resolve().parent / "output"):
-        output_path_env = os.getenv("share_dir_trend_analysis_output_path") or os.getenv("SHARE_DIR_TREND_ANALYSIS_OUTPUT_DIR")
-        if output_path_env:
-            args.output_dir = output_path_env if Path(output_path_env).is_absolute() else str(Path(project_root) / output_path_env)
-        else:
-            args.output_dir = DEFAULT_TREND_OUTPUT_DIR
+    # input/output 默认在脚本目录下；权重解析：参数 > env > 本地默认
+    if not args.model_path and not os.getenv("TREND_MODEL_PATH"):
+        args.model_path = DEFAULT_TREND_MODEL_PATH
 
     # Preserve legacy behavior: if old callers pass --process_id and --folder_path
     # without --mode, treat the invocation as one-shot prediction.
