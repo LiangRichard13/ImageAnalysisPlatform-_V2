@@ -8,8 +8,6 @@ __pycache__/
 *.ckpt
 *.pt
 *.pkl
-core/anomaly/dinomaly/weights/
-core/trend/weights/
 
 # ---- 运行输出与临时文件 ----
 download/
