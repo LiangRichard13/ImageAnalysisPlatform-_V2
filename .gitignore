@@ -27,3 +27,6 @@ core/results/
 .idea/
 Thumbs.db
 .DS_Store
+
+# ---- 日志 ----
+*.log
