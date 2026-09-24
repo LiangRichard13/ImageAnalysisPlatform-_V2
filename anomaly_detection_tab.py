@@ -201,12 +201,13 @@ class BatchProcessingThread(QThread):
             while self.is_running:
                 # 扫描图片
                 image_files = self.scan_images()
-                
+
                 if image_files:
-                    # 过滤掉已处理的图片
+                    # 过滤掉已处理的图片，再仅对新图按创建时间排序（避免大目录全量排序）
                     new_images = [img for img in image_files if img not in self.processed_images]
-                    
+
                     if new_images:
+                        new_images.sort(key=os.path.getctime)
                         logger.info(f"扫描到 {len(new_images)} 张新图片待处理")
                         # 设置当前批次
                         self.current_batch_images = new_images
@@ -245,27 +246,22 @@ class BatchProcessingThread(QThread):
             self.batch_finished.emit()
     
     def scan_images(self):
-        """扫描指定目录中的图片文件"""
+        """扫描指定目录中的图片文件（scandir 枚举，元数据零额外系统调用）"""
         try:
             if not os.path.exists(self.processing_dir):
                 logger.warning(f"监控文件夹不存在: {self.processing_dir}")
                 return []
-                
-            valid_extensions = ['.png', '.jpg', '.jpeg']
+
+            valid_extensions = {'.png', '.jpg', '.jpeg'}
             image_files = []
-            
-            for filename in os.listdir(self.processing_dir):
-                file_path = os.path.join(self.processing_dir, filename)
-                if os.path.isfile(file_path):
-                    _, ext = os.path.splitext(filename.lower())
-                    if ext in valid_extensions:
-                        image_files.append(file_path)
-            
-            # 按创建时间排序（旧的在前，新的在后）
-            image_files.sort(key=lambda x: os.path.getctime(x))
-            
+
+            with os.scandir(self.processing_dir) as entries:
+                for entry in entries:
+                    if entry.is_file() and os.path.splitext(entry.name.lower())[1] in valid_extensions:
+                        image_files.append(entry.path)
+
             return image_files
-            
+
         except Exception as e:
             logger.error(f"扫描图片失败: {str(e)}")
             return []
