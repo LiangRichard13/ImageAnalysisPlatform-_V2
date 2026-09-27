@@ -57,18 +57,21 @@ class AnomalyDetectionClient:
         return FileNamer.generate_time_based_name()
 
     @staticmethod
-    def _judge_image_type(image_path: str) -> str:
+    def _judge_shape_type(width: int, height: int) -> str:
+        ratio = width / height
+        if 0.9 <= ratio <= 1.1:
+            return "square"
+        if width == 31901 and height == 1000:
+            return "very long"
+        return "other"
+
+    @classmethod
+    def _judge_image_type(cls, image_path: str) -> str:
         try:
             from PIL import Image
 
             with Image.open(image_path) as img:
-                width, height = img.size
-                ratio = width / height
-                if 0.9 <= ratio <= 1.1:
-                    return "square"
-                if width == 31901 and height == 1000:
-                    return "very long"
-                return "other"
+                return cls._judge_shape_type(*img.size)
         except Exception as exc:
             logger.warning("Failed to judge image type: %s", exc)
             return "other"
@@ -89,6 +92,39 @@ class AnomalyDetectionClient:
         with open(input_dir / "request.json", "w", encoding="utf-8") as file:
             json.dump(metadata, file, ensure_ascii=False, indent=2)
         return input_dir
+
+    def process_from_array(self, gray, engine_name: str = ENGINE_RULE_BASED,
+                           frame_id: int = 0) -> Tuple["np.ndarray", "np.ndarray", dict]:
+        """内存直通入口：GRAY8 ndarray → (pred_u8, heat_u8, metrics)。
+
+        metrics 已注入 process_id 与确定性 files 名——归档 worker 零加工直接落盘。
+        """
+        import numpy as np  # noqa: F401 - 类型引用
+
+        self.process_id = self.get_process_id()
+        image_type = self._judge_shape_type(gray.shape[1], gray.shape[0])
+
+        if engine_name == ENGINE_DINOMALY:
+            from utils.dinomaly_engine import get_dinomaly_engine
+
+            engine = get_dinomaly_engine()
+            pred, heat, metrics = engine.process_array(gray, image_type=image_type)
+        elif engine_name == ENGINE_RULE_BASED:
+            pred, heat, metrics = _get_rule_pipeline().process_array(gray)
+        else:
+            raise ValueError(f"Unknown anomaly engine: {engine_name}")
+
+        metrics = {
+            "process_id": self.process_id,
+            **metrics,
+            "files": {
+                "anomaly_map": f"{self.process_id}.png",
+                "heatmap": f"{self.process_id}_heatmap.png",
+            },
+        }
+        logger.info("Array anomaly processing done, engine=%s type=%s process_id=%s",
+                    engine_name, image_type, self.process_id)
+        return pred, heat, metrics
 
     def process_images(self, image_path: str, engine_name: str = ENGINE_RULE_BASED) -> Tuple[str, str, str]:
         """处理单张图片，返回 (预测图, 热力图, JSON) 本地路径"""
