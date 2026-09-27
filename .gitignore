@@ -30,4 +30,5 @@ Thumbs.db
 *.log
 
 # ---- 本地工具 ----
-tools/
+# tools/ 已改为共享内存诊断/桥接工具源码目录，不再忽略
+.claude/
