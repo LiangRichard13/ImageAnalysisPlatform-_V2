@@ -82,9 +82,9 @@ anomaly_detection_tab.py: BatchProcessingThread 每 5s scandir 轮询
 |---|---|---|
 | `IAP_SHM_CTRL_V1` | 4KB | 控制块：全局配置与状态 |
 | `IAP_SHM_FRAME_V1` | 8 × 36MB = 288MB | 原始帧环形缓冲 |
-| `IAP_SHM_RESULT_V1` | 8 × 36MB = 288MB | 检测结果环形缓冲 |
+| `IAP_SHM_RESULT_V1` | 8 × 64MB = 512MB | 检测结果环形缓冲 |
 
-内存预算合计 ≈ 576MB（预算上限 700MB）。
+内存预算合计 ≈ 800MB（预算上限 1GB）。三端进程一律 **64 位**；命名统一 `Local\` 前缀（或不带前缀，Windows 默认即会话内命名空间），**禁用 `Global\`**（需要 `SeCreateGlobalPrivilege` 特权）。
 
 所有偏移为 slot/块内字节偏移；多字节整数一律**小端**（x86/x64 原生序）；时间戳统一 `timestamp_ns`（Unix 纳秒），心跳为毫秒。
 
@@ -100,7 +100,7 @@ anomaly_detection_tab.py: BatchProcessingThread 每 5s scandir 轮询
 | 20 | 4 | `frame_slots` | u32 = 8 |
 | 24 | 4 | `frame_slot_bytes` | u32 = 37748736（36MB） |
 | 28 | 4 | `result_slots` | u32 = 8 |
-| 32 | 4 | `result_slot_bytes` | u32 = 37748736（36MB） |
+| 32 | 4 | `result_slot_bytes` | u32 = 67108864（64MB） |
 | 36 | 4 | `reserved` | 0 |
 | 40 | 8 | `frame_write_seq` | u64，最新**已完成**原始帧的全局序号（从 1 递增，0=无帧） |
 | 48 | 8 | `result_write_seq` | u64，最新已完成结果的序号 |
@@ -111,6 +111,8 @@ anomaly_detection_tab.py: BatchProcessingThread 每 5s scandir 轮询
 | 88 | 8 | `dropped_by_overwrite` | u64，生产者覆盖未读槽的计数（调试用） |
 | 96 | 8 | `dropped_by_lag` | u64，消费者落后一整圈而丢帧的计数 |
 | 104 | ~3992 | `reserved` | 全 0，未来扩展（V2 字段只能追加在此区域） |
+
+注：V1 交付默认 GRAY8（w×h = 31,901,000B，36MB 帧槽足够）。若启用 GRAY16/RGB8，创建者须按 `w×h×每像素字节 + 64B` 向上取整到整 MB 重算 `frame_slot_bytes`，消费者 attach 时以 CTRL 实际值为准校验。
 
 ### 4.3 FRAME ring slot 布局（每槽 36MB）
 
@@ -134,12 +136,12 @@ anomaly_detection_tab.py: BatchProcessingThread 每 5s scandir 轮询
 | 16 | 8 | `timestamp_ns` | u64，结果完成时刻 |
 | 24 | 4 | `json_bytes` | u32，JSON 区长度（≤ 8192） |
 | 28 | 4 | `pred_bytes` | u32，预测标注图长度 = w×h×1 |
-| 32 | 4 | `heat_bytes` | u32，热力图长度 = (w/4)×(h/4)×1 |
+| 32 | 4 | `heat_bytes` | u32，热力图长度 = w×h×1（全分辨率） |
 | 36 | 4 | `crc32` | u32，三个数据区拼接的 CRC32 |
 | 40 | 24 | `reserved` | 0 |
 | 64 | 8192 | `json` | 检测结果 JSON（与现行 output/{id}.json 字段一致） |
 | 64+8192 | pred_bytes | `pred` | 预测标注图 GRAY8（白底黑标线，语义同现行 {id}.png 的灰度版） |
-| 其后 | heat_bytes | `heat` | 热力图 GRAY8，1/4 分辨率（显示用途足够；需原始分数图时在 V2 追加字段） |
+| 其后 | heat_bytes | `heat` | 异常强度图 GRAY8 **全分辨率（未上色）**：消费端套 JET 伪彩显示（等效 `cv2.applyColorMap(gray, cv2.COLORMAP_JET)`，与归档 PNG 颜色一致）；归档端沿用现行 `cvt2heatmap` 生成彩色 PNG |
 
 ### 4.5 同步原语与语义
 
@@ -183,7 +185,8 @@ anomaly_detection_tab.py: BatchProcessingThread 每 5s scandir 轮询
 - **create-or-open**：首个进程 `CreateFileMappingW` 创建，其余 `OpenFileMappingW` attach；attach 时校验 `magic`/`version`/`frame_slot_bytes` 一致，不一致直接报错退出（禁止静默错读）；
 - **句柄与回收**：Windows 在所有句柄关闭后自动回收页文件 backed mapping；进程崩溃无残留文件；
 - **生产者接管**：新生产者（含桥接进程重启）接管后，`frame_write_seq` **继续递增、不回零**，消费者以 seq 单调性判断新旧；
-- **对端死亡判定**：heartbeat 超时阈值 10s（可配 `.env SHM_HEARTBEAT_TIMEOUT_MS`）→ 消费端 UI 显示"源离线"，mapping 保留等待接管。
+- **对端死亡判定**：heartbeat 超时阈值 10s（可配 `.env SHM_HEARTBEAT_TIMEOUT_MS`）→ 消费端 UI 显示"源离线"，mapping 保留等待接管；
+- **单生产者互斥**：FRAME ring 同一时刻只允许一个生产者（Phase 3 桥接进程或 Phase 4 SDK 采集进程），以命名互斥体 `IAP_PRODUCER_MUTEX` 占用；未持有互斥体的进程对 FRAME ring 只读。
 
 ## 5. 各端改造清单
 
@@ -193,8 +196,8 @@ anomaly_detection_tab.py: BatchProcessingThread 每 5s scandir 轮询
 |---|---|---|
 | A1 | 新增 `utils/ipc/shm_ring.py` | 纯 ctypes 封装（零第三方依赖）：`CreateFileMappingW/OpenFileMappingW/MapViewOfFile/CreateEventW/SetEvent/WaitForSingleObject` + CTRL/slot 结构体读写 + 上述生产/消费流程实现。提供 `FrameRingProducer` / `FrameRingConsumer` / `ResultRingProducer` / `ResultRingConsumer` 四个类 |
 | A2 | 新增 `SharedMemoryIngestThread(QThread)` | 取代 `BatchProcessingThread` 的轮询：事件唤醒 → latest-wins 读帧 → memcpy 出 → 调引擎 → 结果写 RESULT ring → 投递归档队列 |
-| A3 | `utils/rule_based_wrinkle.py` 拆 `process_array(gray)` | `process_array(gray: np.ndarray) -> (pred_u8, heat_u8, metrics_dict)`；现有 `process_to_dir` 改为薄壳（文件模式继续可用，行为不变） |
-| A4 | `utils/dinomaly_engine.py` 补直通入口 | 已有 `process_pil_image(image) -> Dict`；新增 ndarray/PIL 进 → `(pred_u8, heat_u8, json_dict)` 出的包装；`process_to_dir` 保持不变 |
+| A3 | `utils/rule_based_wrinkle.py` 拆 `process_array(gray)` | `process_array(gray: np.ndarray) -> (pred_u8, heat_u8, metrics_dict)`；输入即 GRAY8 ndarray（与 `cv2.imread(..., IMREAD_GRAYSCALE)` 等价）；现有 `process_to_dir` 改为薄壳（文件模式继续可用，行为不变） |
+| A4 | `utils/dinomaly_engine.py` 补直通入口 | 已有 `process_pil_image(image) -> Dict`；新增 ndarray/PIL 进 → `(pred_u8, heat_u8, json_dict)` 出的包装；GRAY8→RGB 三通道扩展在内存完成（`np.repeat`，无编解码）；`process_to_dir` 保持不变 |
 | A5 | `utils/anomaly_detection_client.py` 新增 `process_from_array()` | 内存进出入口；原路径式方法不动 |
 | A6 | 新增归档 worker（分析端进程内后台线程） | 从队列取 `(frame_seq, frame ndarray, result ndarray×2, json)` → 按**现行目录结构**落盘：`input/{id}/{frame_id}.png + request.json`、`output/{id}.png / {id}_heatmap.png / {id}.json`。编码在线程池执行，不阻塞实时链路 |
 | A7 | `anomaly_detection_tab.py` 接入 | shm 模式下显示"实时链路：在线/离线 + 最新 seq + 丢帧计数"；文件轮询面板置灰提示"由实时链路接管"；引擎选择逻辑复用 |
@@ -207,13 +210,14 @@ anomaly_detection_tab.py: BatchProcessingThread 每 5s scandir 轮询
 1. 监听目录 = `.env ONLINE_PROCESSING_AD_DIR`（与现批处理同源）；`ReadDirectoryChangesW`（pywin32）事件驱动 + 200ms 兜底扫描；
 2. 新文件完整后（size 稳定判定：两次采样同 size）解码（PIL/cv2 → GRAY8）→ 写入 FRAME ring；
 3. **已入 ring 的文件移动到 `<监控目录>/.ingested/` 子目录**（防重复入 ring；如 IKapExpert 对目录内容有依赖导致不可移动，降级为 journal 文件记录已处理文件名——实现时二选一，默认移动）；
-4. 桥接进程兼 FRAME ring 的默认创建者（create-or-open 语义，见 4.7）。
+4. 桥接进程兼 FRAME ring 的默认创建者（create-or-open 语义，见 4.7）；
+5. 持有 `IAP_PRODUCER_MUTEX` 才可写帧（单生产者约束）；解码失败（文件未写完整等）进重试队列，超过 3 次丢弃并告警。
 
 链路中仅剩"封闭软件存图编码 + 桥接解码"一段旧路径，其余全部走内存。
 
 ### 5.3 采集端交付物（Phase 4，相机端团队实施）
 
-1. 协议文档 `docs/ipc/SHM_PROTOCOL.md`：本文档第 4 节的独立完整版（布局图、字段表、时序图、错误码、心跳/超时）；
+1. 权威协议文档 `docs/ipc/SHM_PROTOCOL.md`（本设计 §4 的独立完整版）+ 三份端侧指南 `docs/ipc/相机端接入指南.md`、`docs/ipc/分析端实施方案.md`、`docs/ipc/孪生端接入指南.md`（各自内联所需协议子集、参考实现与验收标准，端侧团队只读自己那份即可开工）；
 2. **C# 与 Python 双参考生产者实现**（Python 版对齐 IKapLibrary SDK 的 `GrabContinuous` 帧回调模式：回调内 memcpy 进 slot；C# 版用 `MemoryMappedFile` + `EventWaitHandle`）；
 3. 验收工具 `tools/shm_inspect.py`：dump CTRL 状态/心跳/丢帧计数/单帧导出 PNG，供三端联调自检。
 
@@ -249,7 +253,7 @@ anomaly_detection_tab.py: BatchProcessingThread 每 5s scandir 轮询
 1. **单元测试**（Phase 1）：slot 读写、seq 完成语义、落后一圈覆盖检测、CRC 校验、事件唤醒 + 兜底轮询、create-or-open 并发启动；
 2. **集成压测**（Phase 1）：双进程 1fps×32MB×30min，CRC 全量抽查，断言 `dropped_by_lag` 语义正确；
 3. **回归测试**（Phase 2）：`IPC_MODE=file` 模式下现有批处理/单张处理/检查点行为全部不变；
-4. **验收指标**：帧就绪→孪生可读 ≤ 100ms；分析链路 ≤ 推理耗时 + 50ms；内存预算 ≤ 700MB；归档不阻塞实时链路（归档线程暂停注入测试）。
+4. **验收指标**：帧就绪→孪生可读 ≤ 100ms；分析链路 ≤ 推理耗时 + 50ms；内存预算 ≤ 1GB；归档不阻塞实时链路（归档线程暂停注入测试）。
 
 ## 9. 风险与对策
 
@@ -269,7 +273,7 @@ anomaly_detection_tab.py: BatchProcessingThread 每 5s scandir 轮询
 | 1 | 方案 A：命名共享内存环形缓冲 + 命名事件（否决 ZeroMQ/iceoryx2/mmapped 文件） | 同机部署、32MB 大帧零拷贝刚需、零外部依赖、全栈原生可访问；ZeroMQ 有拷贝，iceoryx2 依赖重且 Windows 成熟度未验证，mmapped 文件没真正脱离磁盘 |
 | 2 | latest-wins 而非逐帧队列 | 推理（秒级）慢于生产（1fps），逐帧队列必然无限积压；三端解耦后各取所需 |
 | 3 | 分析端 memcpy 出 ring 再推理 | 推理秒级，不能长期持有 slot 引用阻塞生产者覆盖 |
-| 4 | 热力图 1/4 分辨率 GRAY8 入 ring | 显示用途足够，控制结果槽体积；原始分数图需求出现时在 V2 追加字段 |
+| 4 | 热力图全分辨率 GRAY8（强度图）入 ring，伪彩交给消费端 | 评审决议（2026-09-27）：孪生端需要全分辨率；存强度图比存彩色省 3 倍槽体积，JET 伪彩由显示端套用（与归档 PNG 的 `cvt2heatmap` 颜色一致）；结果槽因此扩为 64MB |
 | 5 | 归档目录结构与现状完全一致 | 孪生端零成本过渡，可双路并行验证 |
 | 6 | 事件仅做唤醒、seq 保证正确性 | manual-reset 事件的 ResetEvent 竞态跨语言最难讲清；正确性路径越简单越好 |
 | 7 | 文件桥接先行（Phase 3），SDK 采集进程殿后（Phase 4） | 相机端封闭不可改，先用桥接拿到 80% 收益，Phase 4 消除最后一段编码 |
