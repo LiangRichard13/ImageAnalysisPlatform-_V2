@@ -139,16 +139,17 @@ class CtrlBlock:
 
     @classmethod
     def attach(cls, namespace: str) -> "CtrlBlock":
-        """不指定几何参数的只读挂载：仅校验 magic/version，几何从块内读。"""
+        """不指定几何参数的挂载：纯打开（无创建副作用），仅校验 magic/version。
+
+        不存在时抛 WinAPIError（调用方自行重试等待生产者）。
+        不得用 CreateFileMapping 兜底——那会物化一个全零 CTRL，
+        与真正的创建者竞态（已由双消费者测试证实）。
+        """
         name = obj_name(namespace, "SHM_CTRL_V1")
-        handle, created = win32.create_file_mapping(name, CTRL_SIZE)
+        handle = win32.open_file_mapping(name)
         base = win32.map_viewOfFile(handle, CTRL_SIZE)
         view = (ctypes.c_char * CTRL_SIZE).from_address(base)
-        blk = cls(view, created, handle)
-        if created:
-            blk.close()
-            raise ProtocolMismatchError(
-                f"CTRL {name} 不存在（本次调用变成了新建）——生产者是否已启动？")
+        blk = cls(view, False, handle)
         try:
             import time as _t
             for _ in range(3):
