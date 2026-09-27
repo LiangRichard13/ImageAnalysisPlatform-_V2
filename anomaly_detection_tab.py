@@ -349,6 +349,7 @@ class AnomalyDetectionWidget(QWidget):
 
         self.init_ui()
         self.setup_logging()
+        self._setup_ipc_mode()
 
     def init_ui(self):
         """初始化用户界面"""
@@ -886,13 +887,76 @@ class AnomalyDetectionWidget(QWidget):
         """检测算法切换回调"""
         engine_name = self.engine_combo.currentData()
         self.settings.setValue("anomaly_engine", engine_name)
+        if getattr(self, "_ingest_thread", None) is not None:
+            self._ingest_thread.set_engine(engine_name)
         if engine_name == ENGINE_DINOMALY:
             logger.info("已切换到深度学习检测（Dinomaly）：首次使用时将加载模型权重，耗时较久请耐心等待")
         else:
             logger.info("已切换到规则化检测（快速）")
 
+    def _setup_ipc_mode(self):
+        """按 .env IPC_MODE 接入共享内存实时链路（默认 file：零改动）。"""
+        from utils.ipc.config import load_ipc_config
+
+        self._ipc_mode = load_ipc_config().mode
+        self._ingest_thread = None
+        if self._ipc_mode != "shm":
+            return
+
+        logger.info("IPC_MODE=shm：文件轮询批处理由实时链路接管")
+        self.start_batch_btn.setEnabled(False)
+        self.batch_status_label.setText("批处理状态: 由实时链路接管（IPC_MODE=shm）")
+        self.batch_status_label.setStyleSheet("color: purple; font-size: 10px;")
+
+        from utils.anomaly_detection_client import ENGINE_RULE_BASED
+        from utils.shm_ingest import SharedMemoryIngestThread
+
+        self.shm_status_label = QLabel("实时链路: 初始化...")
+        self.shm_status_label.setStyleSheet("color: gray; font-size: 10px;")
+        self.shm_status_label.setWordWrap(True)
+        self.batch_status_label.parentWidget().layout().addWidget(self.shm_status_label)
+
+        self._ingest_thread = SharedMemoryIngestThread(
+            engine_name=self.engine_combo.currentData() or ENGINE_RULE_BASED)
+        self._ingest_thread.result_ready.connect(self._on_shm_result)
+        self._ingest_thread.source_online.connect(self._on_shm_online)
+        self._ingest_thread.stats.connect(self._on_shm_stats)
+        self._ingest_thread.archive_dropped.connect(self._on_shm_archive_dropped)
+        self._ingest_thread.error.connect(lambda msg: logger.error(msg))
+        self._ingest_thread.start()
+
+    def _on_shm_result(self, frame_seq, payload):
+        """实时结果：JSON 展示 + 异常级别告警（图像实时显示由孪生端负责）。"""
+        self.current_results = None
+        json_display = self.json_tab.findChild(QTextEdit)
+        if json_display:
+            json_display.setText(json.dumps(payload, ensure_ascii=False, indent=2))
+        self.check_anomaly_level(payload)
+        logger.info(f"实时链路结果 frame_seq={frame_seq} "
+                    f"level={payload.get('anomaly_level')}")
+
+    def _on_shm_online(self, online):
+        self.shm_status_label.setText(
+            f"实时链路: {'在线' if online else '源离线（等待生产者心跳）'}")
+        self.shm_status_label.setStyleSheet(
+            f"color: {'green' if online else '#f44336'}; font-size: 10px;")
+
+    def _on_shm_stats(self, frame_seq, result_seq, dropped_lag, dropped_overwrite):
+        self.shm_status_label.setText(
+            self.shm_status_label.text().split(" | ")[0] +
+            f" | 帧 seq={frame_seq} 结果 seq={result_seq}"
+            f" | 丢帧 lag={dropped_lag} 覆盖={dropped_overwrite}")
+
+    def _on_shm_archive_dropped(self, count):
+        logger.warning(f"归档队列溢出，累计丢弃 {count} 件（实时链路不受影响）")
+
     def start_batch_processing(self):
         """启动在线批处理"""
+        if getattr(self, "_ipc_mode", "file") == "shm":
+            QMessageBox.information(self, "实时链路模式",
+                                    "当前 IPC_MODE=shm，文件轮询批处理已由共享内存实时链路接管。\n"
+                                    "如需恢复，请将 .env 中 IPC_MODE 改为 file 后重启。")
+            return
         try:
             # 从界面读取监控文件夹
             processing_dir = self.batch_dir_edit.text().strip()
@@ -1362,6 +1426,11 @@ class AnomalyDetectionWidget(QWidget):
 
     def closeEvent(self, event):
         """窗口关闭事件"""
+        # 先停实时链路线程（含归档 worker），避免 Qt 对象销毁后信号触达
+        if getattr(self, "_ingest_thread", None) is not None:
+            self._ingest_thread.stop()
+            self._ingest_thread.wait(15000)
+            self._ingest_thread = None
         # 关闭日志处理器
         if hasattr(self, 'log_handler'):
             # 先从root logger中移除handler，避免atexit时的错误
