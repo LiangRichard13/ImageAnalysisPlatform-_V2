@@ -342,11 +342,12 @@ class RuleBasedWrinklePipeline:
             },
         }
 
-    def process_to_dir(self, image_path: str, output_dir: str, process_id: str) -> Tuple[str, str, str]:
-        """处理单张图片，三件套写入 output_dir/process_id/，返回 (预测图, 热力图, JSON) 路径"""
-        gray = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
-        if gray is None:
-            raise ValueError(f"Failed to read image: {image_path}")
+    def process_array(self, gray: np.ndarray) -> Tuple[np.ndarray, np.ndarray, Dict]:
+        """内存直通入口：GRAY8(H×W) → (pred_u8, heat_u8, metrics)。
+
+        pred 与 heat 同源（未上色强度图，归档时才 cvt2heatmap 上色）；
+        metrics 不含 process_id/files（由文件路径模式/归档 worker 补齐）。
+        """
         img_height, img_width = gray.shape[:2]
 
         start_time = time.perf_counter()
@@ -354,20 +355,9 @@ class RuleBasedWrinklePipeline:
         duration_ms = (time.perf_counter() - start_time) * 1000
         logger.info("Rule-based detection: %d wrinkles found in %.1f ms", len(wrinkles), duration_ms)
 
-        process_dir = Path(output_dir) / process_id
-        process_dir.mkdir(parents=True, exist_ok=True)
-
         anomaly_map = self._compose_anomaly_map((img_height, img_width), wrinkles)
-        anomaly_map_path = process_dir / f"{process_id}.png"
-        heatmap_path = process_dir / f"{process_id}_heatmap.png"
-        json_path = process_dir / f"{process_id}.json"
-
-        cv2.imwrite(str(anomaly_map_path), anomaly_map)
-        cv2.imwrite(str(heatmap_path), cvt2heatmap(anomaly_map))
-
         overall_score = self._overall_score(wrinkles, img_width)
-        result_data = {
-            "process_id": process_id,
+        metrics = {
             "processing_mode": "rule_based",
             "model_weight": "rule_based",
             "sample_score": overall_score,
@@ -377,11 +367,34 @@ class RuleBasedWrinklePipeline:
             "num_crops": DISPLAY_NUM_CROPS,
             "timestamp": datetime.now().isoformat(),
             "crop_results": self._build_crop_results(wrinkles, img_width, img_height),
+            "wrinkles": [self._wrinkle_to_json(wrinkle) for wrinkle in wrinkles],
+        }
+        return anomaly_map, anomaly_map, metrics
+
+    def process_to_dir(self, image_path: str, output_dir: str, process_id: str) -> Tuple[str, str, str]:
+        """处理单张图片，三件套写入 output_dir/process_id/，返回 (预测图, 热力图, JSON) 路径"""
+        gray = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+        if gray is None:
+            raise ValueError(f"Failed to read image: {image_path}")
+
+        pred, heat, metrics = self.process_array(gray)
+
+        process_dir = Path(output_dir) / process_id
+        process_dir.mkdir(parents=True, exist_ok=True)
+        anomaly_map_path = process_dir / f"{process_id}.png"
+        heatmap_path = process_dir / f"{process_id}_heatmap.png"
+        json_path = process_dir / f"{process_id}.json"
+
+        cv2.imwrite(str(anomaly_map_path), pred)
+        cv2.imwrite(str(heatmap_path), cvt2heatmap(heat))
+
+        result_data = {
+            "process_id": process_id,
+            **metrics,
             "files": {
                 "anomaly_map": anomaly_map_path.name,
                 "heatmap": heatmap_path.name,
             },
-            "wrinkles": [self._wrinkle_to_json(wrinkle) for wrinkle in wrinkles],
         }
 
         with open(json_path, "w", encoding="utf-8") as file:

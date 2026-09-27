@@ -217,6 +217,7 @@ class DinomalyEngine:
         crops_results: List[Tuple[Dict, Tuple[int, int, int, int]]],
         original_size: Tuple[int, int],
         exclude_edge_crops: int,
+        include_heatmap: bool = True,
     ) -> Dict:
         width, height = original_size
         merged_anomaly_map = np.zeros((height, width), dtype=np.float32)
@@ -254,7 +255,7 @@ class DinomalyEngine:
 
         return {
             "anomaly_map_uint8": map_uint8,
-            "heatmap": _cvt2heatmap(map_uint8),
+            "heatmap": _cvt2heatmap(map_uint8) if include_heatmap else None,
             "overall_score": overall_score,
             "overall_anomaly_level": self._get_overall_anomaly_level(scores_for_overall),
             "crop_results": crop_results_data,
@@ -321,6 +322,65 @@ class DinomalyEngine:
         return self._write_outputs(process_dir, results["anomaly_map_uint8"], results["heatmap"], result_data)
 
     # ---------- 对外入口（与规则引擎签名一致） ----------
+
+    def process_array(
+        self,
+        gray: np.ndarray,
+        image_type: str = "very long",
+        exclude_edge_crops: int = 2,
+    ) -> Tuple[np.ndarray, np.ndarray, Dict]:
+        """内存直通入口：GRAY8(H×W) → (pred_u8, heat_u8, metrics)。
+
+        pred 与 heat 同源（未上色强度图，归档时才上色）；跳过合并阶段的
+        applyColorMap（include_heatmap=False）。metrics 不含 process_id/files。
+        """
+        rgb = np.repeat(gray[..., None], 3, axis=2)
+        image = Image.fromarray(rgb, "RGB")
+
+        if image_type == "square":
+            results = self.process_pil_image(image)
+            map_uint8 = (_min_max_norm(results["anomaly_map"]) * 255).astype(np.uint8)
+            sample_score = results["sample_score"]
+            metrics = {
+                "model_weight": self.model_path,
+                "sample_score": sample_score,
+                "anomaly_level": self._get_anomaly_level(sample_score),
+                "analog_voltage": self._calculate_analog_voltage(sample_score),
+                "image_size": list(results["original_size"]),
+                "processed_size": list(results["processed_size"]),
+                "timestamp": datetime.now().isoformat(),
+            }
+            return map_uint8, map_uint8, metrics
+
+        if image_type == "very long":
+            crops = self._crop_fixed(image)
+            processing_mode = "fixed_crop"
+            edge_crops = exclude_edge_crops
+        else:
+            crops = self._crop_adaptive(image)
+            processing_mode = "adaptive_crop"
+            edge_crops = 0
+
+        crops_results = []
+        for crop_image, position in crops:
+            result = self.process_pil_image(crop_image)
+            crops_results.append((result, position))
+
+        merged = self._merge_crop_results(crops_results, image.size, edge_crops,
+                                          include_heatmap=False)
+        overall_score = merged["overall_score"]
+        metrics = {
+            "processing_mode": processing_mode,
+            "model_weight": self.model_path,
+            "sample_score": overall_score,
+            "anomaly_level": merged["overall_anomaly_level"],
+            "analog_voltage": self._calculate_analog_voltage(overall_score),
+            "original_size": list(merged["original_size"]),
+            "num_crops": merged["num_crops"],
+            "timestamp": datetime.now().isoformat(),
+            "crop_results": merged["crop_results"],
+        }
+        return merged["anomaly_map_uint8"], merged["anomaly_map_uint8"], metrics
 
     def process_to_dir(
         self,
