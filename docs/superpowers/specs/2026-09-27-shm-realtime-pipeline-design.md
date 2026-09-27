@@ -207,7 +207,7 @@ anomaly_detection_tab.py: BatchProcessingThread 每 5s scandir 轮询
 
 `tools/shm_file_bridge.py`（独立进程）：
 
-1. 监听目录 = `.env ONLINE_PROCESSING_AD_DIR`（与现批处理同源）；`ReadDirectoryChangesW`（pywin32）事件驱动 + 200ms 兜底扫描；
+1. 监听目录 = `.env ONLINE_PROCESSING_AD_DIR`（与现批处理同源）；**200ms `scandir` 轮询 + size 稳定判定（两次采样同 size 即完整）**——实现时弃用原设计的 `ReadDirectoryChangesW`：纯 ctypes 实现需约 150 行 OVERLAPPED/IOCP 脆弱 FFI，且其在写入开始时触发、本就需 size 二次确认，1fps 源 + 2s 预算下轮询代价可忽略（2026-09-28 实施裁决，见分析端方案文档）；
 2. 新文件完整后（size 稳定判定：两次采样同 size）解码（PIL/cv2 → GRAY8）→ 写入 FRAME ring；
 3. **已入 ring 的文件移动到 `<监控目录>/.ingested/` 子目录**（防重复入 ring；如 IKapExpert 对目录内容有依赖导致不可移动，降级为 journal 文件记录已处理文件名——实现时二选一，默认移动）；
 4. 桥接进程兼 FRAME ring 的默认创建者（create-or-open 语义，见 4.7）；
