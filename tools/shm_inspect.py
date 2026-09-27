@@ -97,9 +97,12 @@ def cmd_result(args) -> int:
 
 def cmd_crc(args) -> int:
     """对最近 N 个可寻址 seq 抽查 FRAME 槽 CRC。"""
-    from utils.ipc.layout import FRAME_HDR, crc32 as crc_fn
     import numpy as np
-    ctrl, _evt, _ns = _attach(args)
+
+    from utils.ipc.layout import FRAME_HDR, crc32 as crc_fn
+
+    ctrl, evt, ns = _attach(args)
+    ring = shm_ring.FrameRingConsumer.attach(ctrl, ns, evt)
     try:
         latest = ctrl.frame_write_seq
         if latest == 0:
@@ -112,28 +115,22 @@ def cmd_crc(args) -> int:
             if s < 1:
                 break
             off = (s % ctrl.frame_slots) * ctrl.frame_slot_bytes
-            import ctypes
-            view = ctrl._view  # CTRL 视图不含帧数据，改走 ring 映射
-            ring = shm_ring.FrameRingConsumer.attach(
-                ctrl, _ns, shm_ring.NamedEvent(obj_name(_ns, "EVT_FRAME")))
-            try:
-                seq, _ts, _fid, crc, data_bytes, _st = FRAME_HDR.unpack_from(
-                    ring._view[off:off + 64])
-                data = np.frombuffer(ring._view, dtype=np.uint8,
-                                     count=data_bytes, offset=off + 64).copy()
-                if seq != s:
-                    print(f"seq {s}: 槽已被覆盖（当前 seq={seq}）")
-                    continue
-                if crc_fn(data.tobytes()) == crc:
-                    ok += 1
-                else:
-                    bad += 1
-                    print(f"seq {s}: CRC 不一致！")
-            finally:
-                ring.close()
+            seq, _ts, _fid, crc, data_bytes, _st = FRAME_HDR.unpack_from(
+                ring._view[off:off + 64])
+            if seq != s:
+                print(f"seq {s}: 槽已被覆盖（当前 seq={seq}）")
+                continue
+            data = np.frombuffer(ring._view, dtype=np.uint8,
+                                 count=data_bytes, offset=off + 64).copy()
+            if crc_fn(data.tobytes()) == crc:
+                ok += 1
+            else:
+                bad += 1
+                print(f"seq {s}: CRC 不一致！")
         print(f"抽查完成：OK={ok} BAD={bad}")
         return 1 if bad else 0
     finally:
+        ring.close()
         ctrl.close()
 
 

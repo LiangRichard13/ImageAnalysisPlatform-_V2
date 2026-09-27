@@ -82,11 +82,9 @@ def test_bridge_moves_files_into_ring(tmp_path):
     finally:
         proc.terminate()
         try:
-            out = proc.communicate(timeout=10)[0]
+            proc.communicate(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
-            out = ""
-    assert "BRIDGE_STARTED" in out or "BRIDGE" in out or out == "" or True  # 输出仅用于排障
 
 
 def test_bridge_rejects_wrong_size_to_failed(tmp_path):

@@ -81,15 +81,17 @@ def test_ingest_full_pipeline(tmp_path):
             ctrl.close()
 
         # 归档三件套落盘（input/{id}/ + output/{id}/）
-        deadline = threading.Event()
         import time
         t_end = time.monotonic() + 10
+        outs = ins = []
         while time.monotonic() < t_end:
             outs = list((tmp_path / "anomaly_api" / "output").glob("*/"))
             ins = list((tmp_path / "anomaly_api" / "input").glob("*/"))
             if outs and ins:
                 break
             time.sleep(0.2)
+        assert outs, "归档 output 未落盘"
+        assert ins, "归档 input 未落盘"
         out_dir = outs[0]
         pid = out_dir.name
         assert (out_dir / f"{pid}.png").exists()

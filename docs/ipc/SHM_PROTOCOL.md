@@ -22,6 +22,7 @@
 | `Local\IAP_EVT_FRAME` | manual-reset event | — | 有新原始帧（唤醒提示，不保证正确性） |
 | `Local\IAP_EVT_RESULT` | manual-reset event | — | 有新结果 |
 | `Local\IAP_PRODUCER_MUTEX` | mutex | — | FRAME ring 单生产者占用（同时只允许一个进程写 FRAME） |
+| `Local\IAP_ANALYZER_MUTEX` | mutex | — | RESULT ring 单写者防御（V1.1 增补，2026-09-28）：分析端启动时 try-acquire，失败即拒绝第二实例；WAIT_ABANDONED = 前任崩溃接管 |
 
 内存预算合计 ≈ 800MB（上限 1GB）。心跳超时阈值 10s；事件等待超时/兜底轮询 50ms。
 
@@ -52,6 +53,8 @@
 | 104 | ~3992 | `reserved` | 全 0；V2 字段只能追加于此 |
 
 启用 GRAY16/RGB8 时，创建者按 `w×h×每像素字节 + 64B` 向上取整到整 MB 重算 `frame_slot_bytes`，消费者以 CTRL 实际值校验。
+
+**槽尺寸推导（V1.1 勘误，2026-09-28）**：建环方统一使用以下规则，不得自创公式——产线尺寸 (31901,1000) 用上表定值（FRAME 37748736 / RESULT 67108864）；其余尺寸：`FRAME = ceil((w×h×bpp + 64) / MB)`、`RESULT = ceil((64 + 8192 + 2×w×h×bpp) / MB)`（RESULT 槽须容纳头 + json 固定区 + **两份**全图 pred/heat）。程序化实现见 `utils/ipc/layout.py::protocol_frame_slot_bytes / protocol_result_slot_bytes`，写入口有槽容量断言 fail-fast。
 
 ## 3. FRAME slot（每槽 36MB）
 

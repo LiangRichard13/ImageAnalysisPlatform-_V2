@@ -21,6 +21,9 @@ from pathlib import Path
 # 设置日志
 logger = logging.getLogger(__name__)
 
+# closeEvent 时仍未退出的 ingest 线程转入此处保活（防 QThread 销毁崩溃）
+_KEEPALIVE_THREADS = []
+
 class ImageProcessingThread(QThread):
     """图片处理线程"""
     finished = pyqtSignal(str, str, str)  # 处理完成信号，传递三个结果文件路径
@@ -655,6 +658,7 @@ class AnomalyDetectionWidget(QWidget):
         batch_frame.setMaximumHeight(190)
         batch_frame.setMinimumHeight(150)
         upload_layout.addWidget(batch_frame)
+        self._batch_layout = batch_layout  # 供 shm 模式追加实时链路状态行（M1：不回溯查父布局）
         
         # 图片预览区域
         preview_frame = QFrame()
@@ -914,7 +918,7 @@ class AnomalyDetectionWidget(QWidget):
         self.shm_status_label = QLabel("实时链路: 初始化...")
         self.shm_status_label.setStyleSheet("color: gray; font-size: 10px;")
         self.shm_status_label.setWordWrap(True)
-        self.batch_status_label.parentWidget().layout().addWidget(self.shm_status_label)
+        self._batch_layout.addWidget(self.shm_status_label)
 
         self._ingest_thread = SharedMemoryIngestThread(
             engine_name=self.engine_combo.currentData() or ENGINE_RULE_BASED)
@@ -1426,10 +1430,16 @@ class AnomalyDetectionWidget(QWidget):
 
     def closeEvent(self, event):
         """窗口关闭事件"""
-        # 先停实时链路线程（含归档 worker），避免 Qt 对象销毁后信号触达
-        if getattr(self, "_ingest_thread", None) is not None:
-            self._ingest_thread.stop()
-            self._ingest_thread.wait(15000)
+        # 先停实时链路线程（含归档 worker），避免 Qt 对象销毁后信号触达。
+        # dinomaly 长推理可能超 15s：未退出的线程转入模块级保活列表，
+        # 决不能置 None 丢引用（GC 会触发 Qt fatal: Destroyed while running）
+        ingest = getattr(self, "_ingest_thread", None)
+        if ingest is not None:
+            ingest.stop()
+            ingest.wait(15000)
+            if ingest.isRunning():
+                logger.warning("实时链路线程仍在收尾（长推理），已转入后台保活等待退出")
+                _KEEPALIVE_THREADS.append(ingest)
             self._ingest_thread = None
         # 关闭日志处理器
         if hasattr(self, 'log_handler'):

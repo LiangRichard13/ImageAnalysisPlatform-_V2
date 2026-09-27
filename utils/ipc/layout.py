@@ -49,6 +49,28 @@ def crc32(data) -> int:
     return zlib.crc32(data) & 0xFFFFFFFF
 
 
+# ---- 槽尺寸推导（协议 §2/§4 的程序化表达；建环工具统一走这里，不得自创公式） ----
+PROD_W, PROD_H = 31901, 1000                # 产线线阵尺寸
+PROD_FRAME_SLOT_BYTES = 37748736            # 协议表定值：36MB
+PROD_RESULT_SLOT_BYTES = 67108864           # 协议表定值：64MB
+_MB = 1024 * 1024
+
+
+def protocol_frame_slot_bytes(width: int, height: int, bpp: int = 1) -> int:
+    """产线尺寸用协议表定值；其余按布局需求（数据+头）上取整到整 MB。"""
+    if (width, height) == (PROD_W, PROD_H):
+        return PROD_FRAME_SLOT_BYTES
+    return (width * height * bpp + HDR_SIZE + _MB - 1) // _MB * _MB
+
+
+def protocol_result_slot_bytes(width: int, height: int, bpp: int = 1) -> int:
+    """RESULT 槽须容纳 头64 + json区8192 + pred + heat（两份全图）。"""
+    if (width, height) == (PROD_W, PROD_H):
+        return PROD_RESULT_SLOT_BYTES
+    need = HDR_SIZE + JSON_MAX + 2 * width * height * bpp
+    return (need + _MB - 1) // _MB * _MB
+
+
 def obj_name(namespace: str, suffix: str) -> str:
     """namespace + 协议对象名，如 ('Local\\\\IAP', 'SHM_CTRL_V1') -> Local\\IAP_SHM_CTRL_V1。"""
     return f"{namespace}_{suffix}"

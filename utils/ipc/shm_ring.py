@@ -18,6 +18,21 @@ from utils.ipc.layout import (
 _READ_RETRIES = 5
 
 
+def _memmove_into(view, dst_off: int, src, n: int) -> None:
+    """C 级 memcpy 写入共享内存视图。
+
+    禁止用 ctypes 数组切片赋值搬大数据：c_char 数组的切片赋值走 memoryview
+    逐元素慢路径（实测 32MB 约 1.2s，memmove 约 10ms，差 100 倍）。
+    src 接受 bytes 或（C 连续的）numpy 数组——后者零中间拷贝直传。
+    """
+    import ctypes
+    if isinstance(src, np.ndarray):
+        src = np.ascontiguousarray(src)
+        ctypes.memmove(ctypes.addressof(view) + dst_off, src.ctypes.data_as(ctypes.c_void_p), n)
+    else:
+        ctypes.memmove(ctypes.addressof(view) + dst_off, src, n)
+
+
 class NamedEvent:
     """manual-reset 命名事件（create-or-open）。"""
 
@@ -164,7 +179,12 @@ class FrameRingProducer(_RingBase):
             raise ValueError(
                 f"frame shape ({w},{h}) != CTRL "
                 f"({self._ctrl.frame_width},{self._ctrl.frame_height})")
-        data = gray.tobytes()
+        n = gray.size
+        if FRAME_DATA_OFF + n > self.slot_bytes:
+            raise ValueError(
+                f"slot capacity exceeded: {FRAME_DATA_OFF}+{n} > "
+                f"{self.slot_bytes}B（建环槽尺寸错误，见 layout.protocol_frame_slot_bytes）")
+        gray = np.ascontiguousarray(gray)
 
         # 1. 心跳
         self._ctrl.producer_heartbeat_ms = win32.GetTickCount64()
@@ -172,11 +192,11 @@ class FrameRingProducer(_RingBase):
         next_seq = self._ctrl.frame_write_seq + 1
         off = self._slot_off(next_seq)
         self._view[off:off + HDR_SIZE] = FRAME_HDR.pack(
-            0, now_ns(), frame_id, crc32(data), len(data), STATUS_WRITING)
+            0, now_ns(), frame_id, crc32(gray), n, STATUS_WRITING)
         if next_seq > self.slots:
             self._ctrl.dropped_by_overwrite = self._ctrl.dropped_by_overwrite + 1
-        # 3. 数据
-        self._view[off + FRAME_DATA_OFF:off + FRAME_DATA_OFF + len(data)] = data
+        # 3. 数据（memmove：C 级 memcpy，勿用切片赋值——见 _memmove_into 注释）
+        _memmove_into(self._view, off + FRAME_DATA_OFF, gray, n)
         # 4. seq = 完成标记
         self._view[off:off + 8] = next_seq.to_bytes(8, "little")
         self._view[off + 32:off + 36] = STATUS_READY.to_bytes(4, "little")
@@ -251,6 +271,12 @@ class ResultRingProducer(_RingBase):
         if pred.dtype != np.uint8 or heat.dtype != np.uint8:
             raise ValueError("pred/heat must be uint8")
         crc = crc32(json_bytes + pred.tobytes() + heat.tobytes())
+        need = HDR_SIZE + JSON_MAX + pred.size + heat.size
+        if need > self.slot_bytes:
+            raise ValueError(
+                f"slot capacity exceeded: need {need}B > {self.slot_bytes}B"
+                "（RESULT 槽须容纳 头64+json8192+pred+heat，"
+                "见 layout.protocol_result_slot_bytes）")
 
         # 1. 心跳
         self._ctrl.analyzer_heartbeat_ms = win32.GetTickCount64()
@@ -259,11 +285,11 @@ class ResultRingProducer(_RingBase):
         off = self._slot_off(next_seq)
         self._view[off:off + HDR_SIZE] = RESULT_HDR.pack(
             0, frame_seq, now_ns(), len(json_bytes), pred.size, heat.size, crc)
-        # 3. 数据：json 固定区 + pred + heat
-        self._view[off + RESULT_JSON_OFF:off + RESULT_JSON_OFF + len(json_bytes)] = json_bytes
+        # 3. 数据：json 固定区 + pred + heat（大数据走 memmove）
+        _memmove_into(self._view, off + RESULT_JSON_OFF, json_bytes, len(json_bytes))
         p_off = off + RESULT_JSON_OFF + JSON_MAX
-        self._view[p_off:p_off + pred.size] = pred.tobytes()
-        self._view[p_off + pred.size:p_off + pred.size + heat.size] = heat.tobytes()
+        _memmove_into(self._view, p_off, pred, pred.size)
+        _memmove_into(self._view, p_off + pred.size, heat, heat.size)
         # 4. seq 最后写
         self._view[off:off + 8] = next_seq.to_bytes(8, "little")
         # 5. 全局序号；6. 唤醒

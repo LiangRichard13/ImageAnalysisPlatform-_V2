@@ -390,11 +390,12 @@ class RuleBasedWrinklePipeline:
 
         result_data = {
             "process_id": process_id,
-            **metrics,
+            **{k: v for k, v in metrics.items() if k != "wrinkles"},
             "files": {
                 "anomaly_map": anomaly_map_path.name,
                 "heatmap": heatmap_path.name,
             },
+            "wrinkles": metrics["wrinkles"],  # 键序与旧版逐字段一致（files 在 wrinkles 前）
         }
 
         with open(json_path, "w", encoding="utf-8") as file:

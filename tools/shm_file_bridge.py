@@ -26,25 +26,18 @@ import numpy as np  # noqa: E402
 
 from utils.ipc import shm_ring                            # noqa: E402
 from utils.ipc.config import load_ipc_config              # noqa: E402
-from utils.ipc.layout import CtrlBlock, obj_name          # noqa: E402
+from utils.ipc.layout import (CtrlBlock, obj_name,        # noqa: E402
+                              protocol_frame_slot_bytes, protocol_result_slot_bytes)
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp"}
-MB = 1024 * 1024
-
-
-def _slot_bytes(width: int, height: int) -> int:
-    need = width * height + 64
-    return (need + MB - 1) // MB * MB
 
 
 class Bridge:
     def __init__(self, watch_dir: Path, namespace: str, poll_ms: int = 200,
-                 stability_ms: int = 100, max_retries: int = 3,
-                 expected_size=None):
+                 max_retries: int = 3, expected_size=None):
         self.watch_dir = watch_dir
         self.namespace = namespace
         self.poll_interval = poll_ms / 1000.0
-        self.stability_ms = stability_ms
         self.max_retries = max_retries
         self.expected_size = expected_size  # (w, h)：显式几何，混尺寸目录下确定性建环
         self._ctrl = None
@@ -53,6 +46,7 @@ class Bridge:
         self._mutex = None
         self._frame_id = 0
         self._pending = {}     # path -> [size_at_first_sight, retries]
+        self._stuck = set()    # journal 降级过的文件：跳过，防重复入环
         self._journal = watch_dir / ".bridge_journal.txt"
 
     def _staging_dirs(self):
@@ -65,11 +59,11 @@ class Bridge:
             return True
         h, w = gray.shape[:2]
         slots = 8
-        slot = _slot_bytes(w, h)
         ctrl, _ = CtrlBlock.create_or_open(
             self.namespace, width=w, height=h, frame_slots=slots,
-            frame_slot_bytes=slot, result_slots=slots,
-            result_slot_bytes=slot + 8256)
+            frame_slot_bytes=protocol_frame_slot_bytes(w, h),
+            result_slots=slots,
+            result_slot_bytes=protocol_result_slot_bytes(w, h))
         evt = shm_ring.NamedEvent(obj_name(self.namespace, "EVT_FRAME"))
         mutex = shm_ring.NamedMutex(obj_name(self.namespace, "PRODUCER_MUTEX"))
         producer = shm_ring.FrameRingProducer.create_or_attach(ctrl, self.namespace,
@@ -83,7 +77,8 @@ class Bridge:
             return False
         self._ctrl, self._producer, self._evt, self._mutex = ctrl, producer, evt, mutex
         print(f"BRIDGE_STARTED: {self.namespace} geometry={w}x{h} slots={slots} "
-              f"slot_bytes={slot}", flush=True)
+              f"frame_slot={protocol_frame_slot_bytes(w, h)} "
+              f"result_slot={protocol_result_slot_bytes(w, h)}", flush=True)
         return True
 
     def _decode(self, path: Path):
@@ -93,8 +88,17 @@ class Bridge:
         try:
             os.replace(str(path), str(self.watch_dir / ".failed" / path.name))
             print(f"BRIDGE_REJECT: {path.name} {reason}", flush=True)
+            return
         except OSError as exc:
-            self._journal.write_text(f"{path}\t{reason}\t{exc}\n")
+            self._journal_append(path, reason, exc)
+        self._stuck.add(path)
+
+    def _journal_append(self, path: Path, reason: str, exc) -> None:
+        try:
+            with open(self._journal, "a", encoding="utf-8") as fh:
+                fh.write(f"{path}\t{reason}\t{exc}\t{time.time()}\n")
+        except OSError:
+            pass  # journal 也写不进（目录只读等极端场景）：_stuck 集合仍防重复入环
 
     def _ingest(self, path: Path, gray: np.ndarray) -> None:
         self._frame_id += 1
@@ -106,8 +110,14 @@ class Bridge:
                 return
             except OSError:
                 time.sleep(0.2)
-        self._journal.open("a", encoding="utf-8").write(
-            f"{path}\tmoved-failed\t{time.time()}\n")
+        # 移不动：降级 journal + 记入 _stuck（防下轮扫描重复入环）
+        try:
+            os.replace(str(path), str(self.watch_dir / ".failed" / path.name))
+            print(f"BRIDGE_FALLBACK_FAILED_DIR: {path.name}", flush=True)
+            return
+        except OSError as exc:
+            self._journal_append(path, "moved-failed", exc)
+        self._stuck.add(path)
 
     def run(self) -> int:
         if not self.watch_dir.is_dir():
@@ -135,16 +145,25 @@ class Bridge:
             files = [Path(e.path) for e in entries
                      if e.is_file() and e.name[0] != "."
                      and Path(e.name).suffix.lower() in IMAGE_EXTS]
+        files = [p for p in files if p not in self._stuck]
         for path in files:
             state = self._pending.get(path)
-            size = path.stat().st_size
+            try:
+                size = path.stat().st_size
+            except OSError:
+                # 两轮扫描间被外部删除/移动：从待处理剔除，不得让常驻进程崩溃
+                self._pending.pop(path, None)
+                continue
             if state is None:
                 self._pending[path] = [size, 0]
                 continue  # 下一轮比对 size，判写入完成
             if state[0] != size:
                 state[0] = size  # 仍在写入
                 continue
-            gray = self._decode(path)
+            try:
+                gray = self._decode(path)
+            except OSError:
+                gray = None
             if gray is None:
                 state[1] += 1
                 if state[1] >= self.max_retries:
@@ -166,23 +185,31 @@ class Bridge:
                 continue
             self._pending.pop(path)
             self._ingest(path, gray)
+        # 每轮更新生产者心跳：上游暂停出图时 UI 不误报"源离线"（桥接活着即在线）
+        if self._ctrl is not None:
+            from utils.ipc.win32 import GetTickCount64
+            self._ctrl.producer_heartbeat_ms = GetTickCount64()
 
 
 def main() -> int:
     cfg = load_ipc_config()
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--watch", required=True, help="监控目录（.env ONLINE_PROCESSING_AD_DIR 亦可配后省略）")
+    parser.add_argument("--watch", default=None,
+                        help="监控目录；省略则取 .env ONLINE_PROCESSING_AD_DIR")
     parser.add_argument("--namespace", default=cfg.namespace)
-    parser.add_argument("--poll-ms", type=int, default=200)
-    parser.add_argument("--stability-ms", type=int, default=100)
+    parser.add_argument("--poll-ms", type=int, default=200,
+                        help="扫描轮询间隔；size 稳定判完整亦由相邻两轮承担")
     parser.add_argument("--width", type=int, default=None,
                         help="显式帧几何（推荐产线固定：混尺寸目录下首图定几何不确定）")
     parser.add_argument("--height", type=int, default=None)
     args = parser.parse_args()
     expected = (args.width, args.height) if args.width and args.height else None
-    watch = Path(args.watch or os.getenv("ONLINE_PROCESSING_AD_DIR", ""))
-    return Bridge(watch, args.namespace, args.poll_ms, args.stability_ms,
+    watch_raw = args.watch or os.getenv("ONLINE_PROCESSING_AD_DIR", "")
+    if not watch_raw:
+        parser.error("缺少监控目录：传 --watch 或在 .env 配置 ONLINE_PROCESSING_AD_DIR")
+    watch = Path(watch_raw)
+    return Bridge(watch, args.namespace, args.poll_ms,
                   expected_size=expected).run()
 
 

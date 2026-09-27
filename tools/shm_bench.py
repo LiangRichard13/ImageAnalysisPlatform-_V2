@@ -20,15 +20,10 @@ import numpy as np  # noqa: E402
 
 from utils.ipc import shm_ring                            # noqa: E402
 from utils.ipc.config import load_ipc_config              # noqa: E402
-from utils.ipc.layout import CtrlBlock, obj_name          # noqa: E402
+from utils.ipc.layout import (CtrlBlock, obj_name,        # noqa: E402
+                              protocol_frame_slot_bytes, protocol_result_slot_bytes)
 
 DEFAULT_W, DEFAULT_H = 31901, 1000
-
-
-def _slot_bytes(w: int, h: int) -> int:
-    need = w * h + 64
-    mb = 1024 * 1024
-    return (need + mb - 1) // mb * mb
 
 
 def _make_frame(seq: int, w: int, h: int) -> np.ndarray:
@@ -41,8 +36,10 @@ def _make_frame(seq: int, w: int, h: int) -> np.ndarray:
 def run_producer(args) -> int:
     ctrl, _ = CtrlBlock.create_or_open(
         args.namespace, width=args.width, height=args.height,
-        frame_slots=args.slots, frame_slot_bytes=_slot_bytes(args.width, args.height),
-        result_slots=args.slots, result_slot_bytes=_slot_bytes(args.width, args.height) + 8256)
+        frame_slots=args.slots,
+        frame_slot_bytes=protocol_frame_slot_bytes(args.width, args.height),
+        result_slots=args.slots,
+        result_slot_bytes=protocol_result_slot_bytes(args.width, args.height))
     evt = shm_ring.NamedEvent(obj_name(args.namespace, "EVT_FRAME"))
     mutex = shm_ring.NamedMutex(obj_name(args.namespace, "PRODUCER_MUTEX"))
     producer = shm_ring.FrameRingProducer.create_or_attach(ctrl, args.namespace, evt, mutex)
@@ -130,6 +127,9 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=30.0)
     args = parser.parse_args()
     args.width, args.height = args.size
+    # 消费预算默认覆盖整个生产期 + 启动/收尾余量（帧数/fps + 60s）
+    if args.timeout == 30.0:
+        args.timeout = args.frames / max(args.fps, 0.01) + 60
 
     if args.producer:
         return run_producer(args)
@@ -143,7 +143,12 @@ def main() -> int:
         try:
             return run_consumer(args)
         finally:
-            proc.wait(timeout=30)
+            # 消费者可先于生产者退出（睡眠耗尽 monotonic 预算等）：等不完就杀，不崩
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=10)
     return run_consumer(args)
 
 
