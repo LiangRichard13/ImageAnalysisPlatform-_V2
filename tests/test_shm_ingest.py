@@ -114,14 +114,33 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 os.environ["IPC_MODE"] = "shm"
 sys.path.insert(0, ".")
 from PyQt5.QtWidgets import QApplication
+from utils import dinomaly_engine as de
 import anomaly_detection_tab as tab_mod
+
+# 预热接线记录器（widget __init__ 的 _maybe_preload_engine 与引擎切换都会走它）
+preload_calls = []
+de.preload_dinomaly_engine_async = lambda: preload_calls.append(1) and None
 
 app = QApplication([])
 widget = tab_mod.AnomalyDetectionWidget()
 assert widget._ipc_mode == "shm", widget._ipc_mode
+# 批处理面板整体置灰：监控自动运行，无需任何启动操作
 assert widget.start_batch_btn.isEnabled() is False
+assert widget.batch_dir_edit.isEnabled() is False
+assert widget.browse_btn.isEnabled() is False
 assert widget._ingest_thread is not None
 assert hasattr(widget, "shm_status_label")
+# 上传区保持可用：单张选图检测与实时链路无关
+assert widget.upload_btn.isEnabled() is True
+assert widget.process_btn.isEnabled() is False  # 未选图时禁用（正常语义）
+
+# 预热接线：combo 置 rule 不预热；切 dinomaly 恰好预热一次
+widget.engine_combo.setCurrentIndex(0)  # rule（经 on_engine_changed）
+widget._maybe_preload_engine()
+assert preload_calls == [], "rule 引擎不应预热"
+widget.engine_combo.setCurrentIndex(1)  # dinomaly（经 on_engine_changed 自动预热）
+assert preload_calls == [1], f"切 dinomaly 应恰好预热一次，got {preload_calls}"
+
 # 模式守卫：start_batch_processing 直接短路返回（无头环境打桩掉模态弹窗）
 tab_mod.QMessageBox.information = lambda *a, **k: None
 widget.start_batch_processing()

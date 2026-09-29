@@ -418,6 +418,7 @@ class DinomalyEngine:
 
 _ENGINE: Optional[DinomalyEngine] = None
 _ENGINE_LOCK = threading.Lock()
+_PRELOAD_THREAD: Optional[threading.Thread] = None
 
 
 def get_dinomaly_engine() -> DinomalyEngine:
@@ -428,3 +429,30 @@ def get_dinomaly_engine() -> DinomalyEngine:
             if _ENGINE is None:
                 _ENGINE = DinomalyEngine()
     return _ENGINE
+
+
+def preload_dinomaly_engine_async() -> Optional[threading.Thread]:
+    """后台预热模型权重（幂等）。
+
+    已加载或预热进行中返回 None；否则起 daemon 线程执行懒加载并返回该线程。
+    失败只记日志、不清单例——首次真实使用时 get_dinomaly_engine 会重试。
+    预热中若推理请求到来，双方在 _ENGINE_LOCK 上串行（语义同现状懒加载）。
+    """
+    global _PRELOAD_THREAD
+    if _ENGINE is not None:
+        return None
+    if _PRELOAD_THREAD is not None and _PRELOAD_THREAD.is_alive():
+        return None
+    thread = threading.Thread(target=_preload_worker, daemon=True,
+                              name="DinomalyPreload")
+    _PRELOAD_THREAD = thread
+    thread.start()
+    return thread
+
+
+def _preload_worker() -> None:
+    try:
+        get_dinomaly_engine()
+        logger.info("Dinomaly 权重预热完成，首帧/首张图将不再等待加载")
+    except Exception:
+        logger.exception("Dinomaly 权重预热失败（首次真实使用时将重试）")

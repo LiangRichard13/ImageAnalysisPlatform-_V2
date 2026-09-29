@@ -353,6 +353,7 @@ class AnomalyDetectionWidget(QWidget):
         self.init_ui()
         self.setup_logging()
         self._setup_ipc_mode()
+        self._maybe_preload_engine()
 
     def init_ui(self):
         """初始化用户界面"""
@@ -588,12 +589,12 @@ class AnomalyDetectionWidget(QWidget):
         saved_dir = self.settings.value("batch_monitor_dir", "") or os.getenv("ONLINE_PROCESSING_AD_DIR", "")
         if saved_dir:
             self.batch_dir_edit.setText(saved_dir)
-        browse_btn = QPushButton("浏览...")
-        browse_btn.setStyleSheet(ghost_btn_qss)
-        browse_btn.clicked.connect(self.browse_batch_dir)
+        self.browse_btn = QPushButton("浏览...")
+        self.browse_btn.setStyleSheet(ghost_btn_qss)
+        self.browse_btn.clicked.connect(self.browse_batch_dir)
         dir_row_layout.addWidget(dir_label)
         dir_row_layout.addWidget(self.batch_dir_edit, 1)
-        dir_row_layout.addWidget(browse_btn)
+        dir_row_layout.addWidget(self.browse_btn)
         batch_layout.addLayout(dir_row_layout)
 
         # 批处理按钮行布局 - 启动和停止按钮在同一行
@@ -894,9 +895,21 @@ class AnomalyDetectionWidget(QWidget):
         if getattr(self, "_ingest_thread", None) is not None:
             self._ingest_thread.set_engine(engine_name)
         if engine_name == ENGINE_DINOMALY:
-            logger.info("已切换到深度学习检测（Dinomaly）：首次使用时将加载模型权重，耗时较久请耐心等待")
+            from utils.dinomaly_engine import preload_dinomaly_engine_async
+
+            preload_dinomaly_engine_async()  # 切换即后台预热，不必等第一帧
+            logger.info("已切换到深度学习检测（Dinomaly）：权重开始后台预热")
         else:
             logger.info("已切换到规则化检测（快速）")
+
+    def _maybe_preload_engine(self):
+        """启动预热：界面记忆引擎为 dinomaly 时后台加载权重（file/shm 两模式通用）。"""
+        if self.engine_combo.currentData() != ENGINE_DINOMALY:
+            return
+        from utils.dinomaly_engine import preload_dinomaly_engine_async
+
+        logger.info("记忆引擎为 Dinomaly：启动后台预热模型权重")
+        preload_dinomaly_engine_async()
 
     def _setup_ipc_mode(self):
         """按 .env IPC_MODE 接入共享内存实时链路（默认 file：零改动）。"""
@@ -909,6 +922,9 @@ class AnomalyDetectionWidget(QWidget):
 
         logger.info("IPC_MODE=shm：文件轮询批处理由实时链路接管")
         self.start_batch_btn.setEnabled(False)
+        self.batch_dir_edit.setEnabled(False)
+        self.browse_btn.setEnabled(False)
+        self.batch_dir_edit.setToolTip("实时链路模式（IPC_MODE=shm）无需监控文件夹")
         self.batch_status_label.setText("批处理状态: 由实时链路接管（IPC_MODE=shm）")
         self.batch_status_label.setStyleSheet("color: purple; font-size: 10px;")
 
