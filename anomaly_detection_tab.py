@@ -419,6 +419,9 @@ class AnomalyDetectionWidget(QWidget):
             }
             QComboBox:hover, QLineEdit:hover { border-color: #2196F3; }
             QComboBox:focus, QLineEdit:focus { border: 1px solid #2196F3; }
+            QComboBox:disabled, QLineEdit:disabled {
+                background-color: #f0f0f0; color: #999; border: 1px solid #ddd;
+            }
             QLineEdit[invalid="true"] { border: 1px solid #f44336; background-color: #FFF3F0; }
             QComboBox QAbstractItemView {
                 background-color: white; border: 1px solid #ccc;
@@ -433,6 +436,9 @@ class AnomalyDetectionWidget(QWidget):
             }
             QPushButton:hover { background-color: #e3f2fd; }
             QPushButton:pressed { background-color: #bbdefb; }
+            QPushButton:disabled {
+                background-color: #f0f0f0; color: #999; border: 1px solid #ddd;
+            }
         """
 
         # 检测算法选择行
@@ -618,6 +624,10 @@ class AnomalyDetectionWidget(QWidget):
             }
             QPushButton:pressed {
                 background-color: #6A1B9A;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+                color: #666666;
             }
         """)
         batch_button_row_layout.addWidget(self.start_batch_btn)
@@ -945,15 +955,35 @@ class AnomalyDetectionWidget(QWidget):
         self._ingest_thread.error.connect(lambda msg: logger.error(msg))
         self._ingest_thread.start()
 
-    def _on_shm_result(self, frame_seq, payload):
-        """实时结果：JSON 展示 + 异常级别告警（图像实时显示由孪生端负责）。"""
+    def _on_shm_result(self, frame_seq, payload, gray_img, pred_img, heat_img):
+        """实时结果：帧预览 + 预测图/热力图 + JSON + 异常级别告警。"""
         self.current_results = None
         json_display = self.json_tab.findChild(QTextEdit)
         if json_display:
             json_display.setText(json.dumps(payload, ensure_ascii=False, indent=2))
         self.check_anomaly_level(payload)
+        # 预览区：当前帧缩略
+        self.image_preview.setPixmap(QPixmap.fromImage(gray_img).scaled(
+            self.image_preview.size(), Qt.KeepAspectRatio, Qt.FastTransformation))
+        self._display_qimage(self.prediction_tab, pred_img, "预测结果")
+        self._display_qimage(self.heatmap_tab, heat_img, "热力图")
         logger.info(f"实时链路结果 frame_seq={frame_seq} "
                     f"level={payload.get('anomaly_level')}")
+
+    def _display_qimage(self, tab_widget, qimg, result_type):
+        """QImage 显示到结果 tab（QImage→QPixmap→Fast 缩放，2000 万像素 Smooth 过慢）"""
+        try:
+            scroll_area = tab_widget.findChild(QScrollArea)
+            if scroll_area:
+                image_display = scroll_area.widget()
+                if isinstance(image_display, QLabel):
+                    image_display.setPixmap(QPixmap.fromImage(qimg).scaled(
+                        image_display.size(), Qt.KeepAspectRatio,
+                        Qt.FastTransformation))
+                else:
+                    image_display.setText(f"无法加载{result_type}图片")
+        except Exception as e:
+            logger.error(f"显示{result_type}失败: {str(e)}")
 
     def _on_shm_online(self, online):
         self.shm_status_label.setText(

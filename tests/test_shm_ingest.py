@@ -46,7 +46,9 @@ def test_ingest_full_pipeline(tmp_path):
         api_root=tmp_path / "anomaly_api")
     # 主线程阻塞等待时事件循环不转：测试用 DirectConnection 直接在工作者线程回调
     thread.result_ready.connect(
-        lambda seq, payload: (results.append((seq, payload)), got_result.set()),
+        lambda seq, payload, gray_img, pred_img, heat_img: (
+            results.append((seq, payload, gray_img, pred_img, heat_img)),
+            got_result.set()),
         Qt.DirectConnection)
     online_flags = []
     thread.source_online.connect(lambda on: online_flags.append(on),
@@ -58,10 +60,14 @@ def test_ingest_full_pipeline(tmp_path):
         out, err = proc.communicate(timeout=30)
         assert proc.returncode == 0, f"{out}\n{err}"
         assert len(results) >= 1
-        seq, payload = results[-1]
+        seq, payload, gray_img, pred_img, heat_img = results[-1]
         assert seq >= 1
         assert payload["process_id"]
         assert payload["anomaly_level"] in ("很可能正常", "很可能异常")
+        # UI 展示用 QImage：非空且尺寸与帧一致（JET 上色后为 RGB888 三通道）
+        assert not gray_img.isNull() and gray_img.width() == 320 and gray_img.height() == 200
+        assert not pred_img.isNull() and pred_img.width() == 320 and pred_img.height() == 200
+        assert not heat_img.isNull() and heat_img.width() == 320 and heat_img.height() == 200
 
         # RESULT ring 里也能读到（孪生端视角）
         from utils.ipc import shm_ring
@@ -113,9 +119,16 @@ import os, sys
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 os.environ["IPC_MODE"] = "shm"
 sys.path.insert(0, ".")
+from PyQt5.QtCore import QSettings
 from PyQt5.QtWidgets import QApplication
 from utils import dinomaly_engine as de
 import anomaly_detection_tab as tab_mod
+
+# 固定记忆引擎为已知值（构造期 _maybe_preload_engine 依赖它），
+# 测试后恢复——QSettings 持久化到注册表，不得污染用户真实设置
+_qs = QSettings("analysis_system", "anomaly_detection")
+_old_engine = _qs.value("anomaly_engine", "")
+_qs.setValue("anomaly_engine", "rule_based")
 
 # 预热接线记录器（widget __init__ 的 _maybe_preload_engine 与引擎切换都会走它）
 preload_calls = []
@@ -134,6 +147,19 @@ assert hasattr(widget, "shm_status_label")
 assert widget.upload_btn.isEnabled() is True
 assert widget.process_btn.isEnabled() is False  # 未选图时禁用（正常语义）
 
+# 视觉置灰：自定义 QSS 不得覆盖禁用态（渲染像素非白底/非紫底）
+def _bg_lightness(w):
+    img = w.grab().toImage()
+    xs = range(3, img.width() - 3, max(1, (img.width() - 6) // 8))
+    return max(img.pixelColor(x, img.height() // 2).lightness() for x in xs)
+
+assert _bg_lightness(widget.batch_dir_edit) < 253, \
+    f"输入框禁用态仍为白底: {_bg_lightness(widget.batch_dir_edit)}"
+assert _bg_lightness(widget.browse_btn) < 253, \
+    f"浏览按钮禁用态仍为白底: {_bg_lightness(widget.browse_btn)}"
+assert _bg_lightness(widget.start_batch_btn) < 253, \
+    f"启动按钮禁用态仍为紫底: {_bg_lightness(widget.start_batch_btn)}"
+
 # 预热接线：combo 置 rule 不预热；切 dinomaly 恰好预热一次
 widget.engine_combo.setCurrentIndex(0)  # rule（经 on_engine_changed）
 widget._maybe_preload_engine()
@@ -149,6 +175,10 @@ widget.start_batch_processing()
 widget._ingest_thread.stop()
 widget._ingest_thread.wait(15000)
 widget.close()
+if _old_engine:
+    _qs.setValue("anomaly_engine", _old_engine)
+else:
+    _qs.remove("anomaly_engine")
 print("WIDGET_SMOKE_OK")
 sys.exit(0)
 """

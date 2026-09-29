@@ -13,7 +13,10 @@ import threading
 import time
 from typing import Optional
 
+import cv2
+import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtGui import QImage
 
 from utils.anomaly_detection_client import ENGINE_RULE_BASED, AnomalyDetectionClient
 from utils.archive_worker import ArchiveItem, ArchiveWorker
@@ -25,10 +28,27 @@ from utils.ipc.win32 import GetTickCount64
 logger = logging.getLogger(__name__)
 
 
+def _to_qimage_gray(arr: np.ndarray) -> QImage:
+    """GRAY8 ndarray → 独立 QImage（copy 脱离 numpy 生命周期，跨线程传值安全）。"""
+    arr = np.ascontiguousarray(arr, dtype=np.uint8)
+    h, w = arr.shape[:2]
+    return QImage(arr.tobytes(), w, h, w, QImage.Format_Grayscale8).copy()
+
+
+def _to_qimage_jet(arr: np.ndarray) -> QImage:
+    """异常强度图 → JET 伪彩 RGB888 QImage（与归档 _heatmap.png 颜色一致）。"""
+    colored = cv2.applyColorMap(np.ascontiguousarray(arr, dtype=np.uint8),
+                                cv2.COLORMAP_JET)  # BGR
+    rgb = cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
+    h, w = rgb.shape[:2]
+    return QImage(rgb.tobytes(), w, h, w * 3, QImage.Format_RGB888).copy()
+
+
 class SharedMemoryIngestThread(QThread):
     """FRAME 消费者 + RESULT 生产者 + 归档投递。"""
 
-    result_ready = pyqtSignal(int, dict)        # frame_seq, json_dict
+    # 帧预览/预测图/热力图以 QImage 随结果一并上抛（重活在线程内做完，GUI 只做 scaled）
+    result_ready = pyqtSignal(int, dict, QImage, QImage, QImage)
     source_online = pyqtSignal(bool)            # 仅状态翻转时发
     stats = pyqtSignal(int, int, int, int)       # frame_seq, result_seq, dropped_lag, dropped_overwrite（1Hz）
     archive_dropped = pyqtSignal(int)            # 归档累计丢弃数（变化时发）
@@ -177,6 +197,8 @@ class SharedMemoryIngestThread(QThread):
             json_dict=metrics))
 
         self._last_seq = seq
-        self.result_ready.emit(seq, metrics)
+        self.result_ready.emit(seq, metrics,
+                               _to_qimage_gray(gray), _to_qimage_gray(pred),
+                               _to_qimage_jet(heat))
         logger.info("实时处理完成 frame_seq=%s → result_seq=%s，耗时 %.0f ms",
                     seq, result_seq, (time.perf_counter() - t0) * 1000)
