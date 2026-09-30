@@ -1,7 +1,8 @@
 import sys
 import os
 import logging
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+from pathlib import Path
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QStackedWidget, QLabel,
                              QFrame, QMenuBar, QAction, QMessageBox)
 from PyQt5.QtCore import Qt
@@ -217,7 +218,70 @@ class MainWindow(QMainWindow):
             self.log_handler.close()
         event.accept()
 
+def _setup_frozen_environment():
+    """打包(exe)运行适配：统一 CWD 到 exe 目录、指向外置权重。
+
+    开发态（python main_window.py）无效果；exe 运行时 temp/checkpoint、
+    download/、.env、引擎 work_dirs 全部落 exe 旁，权重走可替换的
+    weights/ 目录（引擎已支持环境变量覆盖，零引擎改动）。
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    exe_dir = Path(sys.executable).resolve().parent
+    os.chdir(exe_dir)
+    weights = exe_dir / "weights"
+    if weights.is_dir():
+        anomaly_weight = weights / "coating_anomaly_final.pth"
+        if anomaly_weight.is_file():
+            os.environ.setdefault("ANOMALY_MODEL_PATH", str(anomaly_weight))
+        ckpts = sorted(weights.glob("*.ckpt"))
+        if ckpts:
+            os.environ.setdefault("TREND_MODEL_PATH", str(ckpts[0]))
+
+
+def _run_smoke_check() -> int:
+    """打包冒烟：核心导入 → dinomaly 权重加载 → 规则引擎推理。
+
+    windowed exe 无 stdout，输出双写 exe 旁 _smoke_result.txt。
+    """
+    lines = []
+
+    def say(msg):
+        lines.append(msg)
+        print(msg, flush=True)
+
+    try:
+        say("[SMOKE] import torch/cv2 ...")
+        import torch
+        import cv2  # noqa: F401
+        say(f"[SMOKE] torch {torch.__version__} cuda={torch.cuda.is_available()}")
+        from utils.dinomaly_engine import get_dinomaly_engine
+        engine = get_dinomaly_engine()
+        say(f"[SMOKE] dinomaly loaded from {engine.model_path}")
+        from utils.rule_based_wrinkle import RuleBasedWrinklePipeline
+        import numpy as np
+        _, _, metrics = RuleBasedWrinklePipeline().process_array(
+            np.zeros((64, 320), dtype=np.uint8))
+        assert metrics.get("anomaly_level"), metrics
+        say("[SMOKE] rule engine OK -> SMOKE_PASS")
+        code = 0
+    except Exception as exc:
+        import traceback
+        say(f"[SMOKE] FAILED: {exc}")
+        lines.extend(traceback.format_exc().splitlines())
+        code = 1
+    try:
+        (Path(sys.executable).parent / "_smoke_result.txt").write_text(
+            "\n".join(lines), encoding="utf-8")
+    except OSError:
+        pass
+    return code
+
+
 def main():
+    _setup_frozen_environment()
+    if "--smoke" in sys.argv:
+        sys.exit(_run_smoke_check())
     app = QApplication(sys.argv)
     ui_theme.apply_theme(app)
     window = MainWindow()
