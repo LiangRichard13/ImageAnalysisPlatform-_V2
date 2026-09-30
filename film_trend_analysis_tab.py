@@ -10,6 +10,7 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject
 from PyQt5.QtGui import QPixmap
 from utils.trend_analysis_client import TrendAnalysisClient
 from ui_theme import apply_theme, status_color, GRAPHITE
+from utils.log_format import IapLogHandler
 import tempfile
 import shutil
 
@@ -273,7 +274,7 @@ class FilmTrendAnalysisWidget(QWidget):
     def setup_logging(self):
         """设置日志系统"""
         # 创建自定义日志处理器
-        self.log_handler = LogHandler()
+        self.log_handler = IapLogHandler()
         self.log_handler.log_signal.connect(self.append_log)
         
         # 获取根日志器并添加处理器
@@ -534,29 +535,6 @@ class FilmTrendAnalysisWidget(QWidget):
             root_logger.removeHandler(self.log_handler)
             self.log_handler.close()
         event.accept()
-
-class LogHandler(logging.Handler, QObject):
-    """自定义日志处理器，用于将日志显示在界面上"""
-    log_signal = pyqtSignal(str)
-    
-    def __init__(self):
-        logging.Handler.__init__(self)
-        QObject.__init__(self)
-        self._closed = False
-    
-    def emit(self, record):
-        if not self._closed:
-            try:
-                log_message = self.format(record)
-                self.log_signal.emit(log_message)
-            except RuntimeError:
-                # Qt对象已被删除，忽略错误
-                pass
-    
-    def close(self):
-        """关闭处理器"""
-        self._closed = True
-        super().close()
 
 def main():
     app = QApplication(sys.argv)

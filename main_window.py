@@ -4,38 +4,16 @@ import logging
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QStackedWidget, QLabel,
                              QFrame, QMenuBar, QAction, QMessageBox)
-from PyQt5.QtCore import Qt, QObject, pyqtSignal
+from PyQt5.QtCore import Qt
 
 # 导入两个界面模块
 from film_trend_analysis_tab import FilmTrendAnalysisWidget
 from anomaly_detection_tab import AnomalyDetectionWidget
+from utils.log_format import IapLogHandler
 import ui_theme
 
 # 设置日志
 logger = logging.getLogger(__name__)
-
-class LogHandler(logging.Handler, QObject):
-    """自定义日志处理器，用于将日志显示在界面上"""
-    log_signal = pyqtSignal(str)
-    
-    def __init__(self):
-        logging.Handler.__init__(self)
-        QObject.__init__(self)
-        self._closed = False
-    
-    def emit(self, record):
-        if not self._closed:
-            try:
-                log_message = self.format(record)
-                self.log_signal.emit(log_message)
-            except RuntimeError:
-                # Qt对象已被删除，忽略错误
-                pass
-    
-    def close(self):
-        """关闭处理器"""
-        self._closed = True
-        super().close()
 
 class FilmTrendAnalysisTab(QWidget):
     """镀膜褶皱趋势预测标签页"""
@@ -218,8 +196,8 @@ class MainWindow(QMainWindow):
         
     def setup_logging(self):
         """设置日志系统"""
-        # 创建自定义日志处理器
-        self.log_handler = LogHandler()
+        # 统一界面日志处理器（utils/log_format.py：时间戳+emoji 事件标记）
+        self.log_handler = IapLogHandler()
         
         # 获取根日志器并添加处理器
         root_logger = logging.getLogger()

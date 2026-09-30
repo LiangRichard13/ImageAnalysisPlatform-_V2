@@ -11,6 +11,7 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject, QSettings
 from PyQt5.QtGui import QPixmap
 from utils.anomaly_detection_client import AnomalyDetectionClient, ENGINE_RULE_BASED, ENGINE_DINOMALY
 from ui_theme import apply_theme, status_color, GRAPHITE
+from utils.log_format import IapLogHandler
 from dotenv import load_dotenv
 import tempfile
 import shutil
@@ -557,13 +558,15 @@ class AnomalyDetectionWidget(QWidget):
                 font-size: 12px;
             }}
         """)
-        self.image_preview.setMinimumSize(200, 150)
-        self.image_preview.setMaximumSize(300, 200)
+        # 扁条预览区：宽随面板伸缩、高固定——线阵长图等比完整显示，
+        # 宽度利用率 100%（原 300×200 框内长图仅 ~9px 高、四周大片空白）
+        self.image_preview.setMinimumWidth(200)
+        self.image_preview.setFixedHeight(48)
         self.image_preview.setText("暂无图片预览")
         preview_layout.addWidget(self.image_preview)
         
-        preview_frame.setMaximumHeight(250)
-        preview_frame.setMinimumHeight(200)
+        preview_frame.setMaximumHeight(110)
+        preview_frame.setMinimumHeight(90)
         upload_layout.addWidget(preview_frame)
         
         # 添加弹性空间
@@ -677,8 +680,8 @@ class AnomalyDetectionWidget(QWidget):
         
     def setup_logging(self):
         """设置日志系统"""
-        # 创建自定义日志处理器
-        self.log_handler = LogHandler()
+        # 统一界面日志处理器（utils/log_format.py：时间戳+emoji 事件标记）
+        self.log_handler = IapLogHandler()
         self.log_handler.log_signal.connect(self.append_log)
         
         # 获取根日志器并添加处理器
@@ -1351,29 +1354,6 @@ class AnomalyDetectionWidget(QWidget):
             root_logger.removeHandler(self.log_handler)
             self.log_handler.close()
         event.accept()
-
-class LogHandler(logging.Handler, QObject):
-    """自定义日志处理器，用于将日志显示在界面上"""
-    log_signal = pyqtSignal(str)
-    
-    def __init__(self):
-        logging.Handler.__init__(self)
-        QObject.__init__(self)
-        self._closed = False
-    
-    def emit(self, record):
-        if not self._closed:
-            try:
-                log_message = self.format(record)
-                self.log_signal.emit(log_message)
-            except RuntimeError:
-                # Qt对象已被删除，忽略错误
-                pass
-    
-    def close(self):
-        """关闭处理器"""
-        self._closed = True
-        super().close()
 
 def main():
     app = QApplication(sys.argv)
