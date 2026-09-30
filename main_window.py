@@ -5,11 +5,11 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QStackedWidget, QLabel,
                              QFrame, QMenuBar, QAction, QMessageBox)
 from PyQt5.QtCore import Qt, QObject, pyqtSignal
-from PyQt5.QtGui import QFont, QIcon
 
 # 导入两个界面模块
 from film_trend_analysis_tab import FilmTrendAnalysisWidget
 from anomaly_detection_tab import AnomalyDetectionWidget
+import ui_theme
 
 # 设置日志
 logger = logging.getLogger(__name__)
@@ -141,72 +141,37 @@ class MainWindow(QMainWindow):
         
     def create_navigation_bar(self, parent_layout):
         """创建导航栏"""
-        # 导航栏容器
+        # 导航栏容器（样式走全局 QSS：QFrame#navBar）
         nav_frame = QFrame()
-        nav_frame.setFrameStyle(QFrame.StyledPanel)
-        nav_frame.setStyleSheet("""
-            QFrame {
-                background-color: #f0f0f0;
-                border-bottom: 1px solid #ccc;
-            }
-        """)
+        nav_frame.setObjectName("navBar")
+        nav_frame.setFrameStyle(QFrame.NoFrame)
         nav_frame.setMaximumHeight(60)
-        
+
         nav_layout = QHBoxLayout(nav_frame)
         nav_layout.setContentsMargins(20, 10, 20, 10)
-        
-        # 系统标题
+
+        # 系统标题（字号/字重由全局 QSS QLabel#navTitle 规定）
         title_label = QLabel("镀膜状态数字孪生在线分析系统")
-        title_label.setFont(QFont("Arial", 16, QFont.Bold))
-        title_label.setStyleSheet("color: #2c3e50;")
+        title_label.setObjectName("navTitle")
         nav_layout.addWidget(title_label)
-        
+
         # 添加弹性空间
         nav_layout.addStretch()
-        
-        # 导航按钮
+
+        # 导航按钮（checkable，激活态由全局 QSS :checked 渲染）
         self.film_trend_btn = QPushButton("镀膜褶皱趋势预测")
-        self.film_trend_btn.setFont(QFont("Arial", 10))
-        self.film_trend_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3498db;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #2980b9;
-            }
-            QPushButton:pressed {
-                background-color: #21618c;
-            }
-        """)
+        self.film_trend_btn.setObjectName("navBtn")
+        self.film_trend_btn.setCheckable(True)
+        self.film_trend_btn.setChecked(True)  # 初始页（switch_to_tab(0) 会因同页短路）
         self.film_trend_btn.clicked.connect(lambda: self.switch_to_tab(0))
         nav_layout.addWidget(self.film_trend_btn)
-        
+
         self.anomaly_detection_btn = QPushButton("异常检测")
-        self.anomaly_detection_btn.setFont(QFont("Arial", 10))
-        self.anomaly_detection_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #95a5a6;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #7f8c8d;
-            }
-            QPushButton:pressed {
-                background-color: #6c7b7d;
-            }
-        """)
+        self.anomaly_detection_btn.setObjectName("navBtn")
+        self.anomaly_detection_btn.setCheckable(True)
         self.anomaly_detection_btn.clicked.connect(lambda: self.switch_to_tab(1))
         nav_layout.addWidget(self.anomaly_detection_btn)
-        
+
         parent_layout.addWidget(nav_frame)
         
     def create_tab_stack(self, parent_layout):
@@ -238,75 +203,9 @@ class MainWindow(QMainWindow):
         logger.info(f"切换到 {tab_names[tab_index]} 界面")
         
     def update_navigation_buttons(self):
-        """更新导航按钮样式"""
-        if self.current_tab == 0:
-            # 镀膜褶皱趋势预测激活
-            self.film_trend_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #3498db;
-                    color: white;
-                    border: none;
-                    padding: 8px 16px;
-                    border-radius: 4px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #2980b9;
-                }
-                QPushButton:pressed {
-                    background-color: #21618c;
-                }
-            """)
-            self.anomaly_detection_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #95a5a6;
-                    color: white;
-                    border: none;
-                    padding: 8px 16px;
-                    border-radius: 4px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #7f8c8d;
-                }
-                QPushButton:pressed {
-                    background-color: #6c7b7d;
-                }
-            """)
-        else:
-            # 异常检测激活
-            self.anomaly_detection_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #e74c3c;
-                    color: white;
-                    border: none;
-                    padding: 8px 16px;
-                    border-radius: 4px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #c0392b;
-                }
-                QPushButton:pressed {
-                    background-color: #a93226;
-                }
-            """)
-            self.film_trend_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #95a5a6;
-                    color: white;
-                    border: none;
-                    padding: 8px 16px;
-                    border-radius: 4px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #7f8c8d;
-                }
-                QPushButton:pressed {
-                    background-color: #6c7b7d;
-                }
-            """)
+        """更新导航按钮选中态（视觉由全局 QSS #navBtn:checked 渲染）"""
+        self.film_trend_btn.setChecked(self.current_tab == 0)
+        self.anomaly_detection_btn.setChecked(self.current_tab == 1)
             
     def show_about(self):
         """显示关于对话框"""
@@ -342,6 +241,7 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    ui_theme.apply_theme(app)
     window = MainWindow()
     window.show()
     sys.exit(app.exec_())

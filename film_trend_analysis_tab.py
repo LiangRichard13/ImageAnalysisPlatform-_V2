@@ -7,8 +7,9 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QLabel, QTextEdit, QFileDialog, QMessageBox, 
                              QScrollArea, QFrame, QProgressBar, QTabWidget)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject
-from PyQt5.QtGui import QPixmap, QFont
+from PyQt5.QtGui import QPixmap
 from utils.trend_analysis_client import TrendAnalysisClient
+from ui_theme import apply_theme, status_color, GRAPHITE
 import tempfile
 import shutil
 
@@ -124,107 +125,39 @@ class FilmTrendAnalysisWidget(QWidget):
         
     def create_upload_area(self, parent_splitter):
         """创建图片上传区域"""
-        # 左侧容器
+        # 左侧容器（面板样式走全局 QSS：QFrame#panelCard）
         upload_frame = QFrame()
-        upload_frame.setFrameStyle(QFrame.StyledPanel)
+        upload_frame.setObjectName("panelCard")
+        upload_frame.setFrameStyle(QFrame.NoFrame)
         upload_layout = QVBoxLayout(upload_frame)
-        
+
         # 标题
         title_label = QLabel("图片上传区域")
-        title_label.setFont(QFont("Arial", 12, QFont.Bold))
+        title_label.setObjectName("sectionTitle")
         title_label.setAlignment(Qt.AlignCenter)
         upload_layout.addWidget(title_label)
-        
-        # 上传按钮
+
+        # 上传按钮（次要操作：ghost 走全局默认按钮样式）
         self.upload_btn = QPushButton("选择图片")
         self.upload_btn.clicked.connect(self.select_images)
-        self.upload_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-                font-size: 11px;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-            QPushButton:pressed {
-                background-color: #3d8b40;
-            }
-        """)
         upload_layout.addWidget(self.upload_btn)
-        
-        # 图片列表
+
+        # 图片列表（样式走全局 QSS：QListWidget）
         self.image_list = QListWidget()
         self.image_list.setMaximumHeight(300)
         self.image_list.setMinimumHeight(200)
-        self.image_list.setStyleSheet("""
-            QListWidget {
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                background-color: white;
-                font-size: 10px;
-            }
-            QListWidget::item {
-                padding: 5px;
-                border-bottom: 1px solid #eee;
-            }
-            QListWidget::item:selected {
-                background-color: #e3f2fd;
-            }
-        """)
         upload_layout.addWidget(self.image_list)
-        
+
         # 清空按钮
         self.clear_btn = QPushButton("清空列表")
         self.clear_btn.clicked.connect(self.clear_image_list)
-        self.clear_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #f44336;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-                font-size: 11px;
-            }
-            QPushButton:hover {
-                background-color: #da190b;
-            }
-            QPushButton:pressed {
-                background-color: #c1170a;
-            }
-        """)
         upload_layout.addWidget(self.clear_btn)
-        
-        # 处理按钮
+
+        # 处理按钮（本页主操作：primary）
         self.process_btn = QPushButton("开始处理")
         self.process_btn.clicked.connect(self.start_processing)
         self.process_btn.setEnabled(False)
-        self.process_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2196F3;
-                color: white;
-                border: none;
-                padding: 10px 20px;
-                border-radius: 4px;
-                font-weight: bold;
-                font-size: 12px;
-            }
-            QPushButton:hover:enabled {
-                background-color: #1976D2;
-            }
-            QPushButton:pressed:enabled {
-                background-color: #1565C0;
-            }
-            QPushButton:disabled {
-                background-color: #cccccc;
-                color: #666666;
-            }
-        """)
+        self.process_btn.setObjectName("primaryBtn")
         upload_layout.addWidget(self.process_btn)
         
         # 进度条
@@ -247,58 +180,18 @@ class FilmTrendAnalysisWidget(QWidget):
         # 标题和刷新按钮
         header_layout = QHBoxLayout()
         title_label = QLabel("处理结果展示")
-        title_label.setFont(QFont("Arial", 12, QFont.Bold))
+        title_label.setObjectName("sectionTitle")
         header_layout.addWidget(title_label)
-        
+        header_layout.addStretch()  # 标题左、按钮右：多余空间给弹性段，按钮不拉通栏
+
         self.refresh_btn = QPushButton("刷新页面")
         self.refresh_btn.clicked.connect(self.refresh_page)
-        self.refresh_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #FF9800;
-                color: white;
-                border: none;
-                padding: 6px 12px;
-                border-radius: 4px;
-                font-weight: bold;
-                font-size: 10px;
-            }
-            QPushButton:hover {
-                background-color: #F57C00;
-            }
-            QPushButton:pressed {
-                background-color: #EF6C00;
-            }
-        """)
         header_layout.addWidget(self.refresh_btn)
-        
+
         display_layout.addLayout(header_layout)
-        
-        # 创建标签页显示不同类型的结果
+
+        # 创建标签页显示不同类型的结果（样式走全局 QSS）
         self.result_tabs = QTabWidget()
-        self.result_tabs.setStyleSheet("""
-            QTabWidget::pane {
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                background-color: white;
-            }
-            QTabBar::tab {
-                background-color: #f0f0f0;
-                color: #333;
-                padding: 8px 16px;
-                margin-right: 2px;
-                border-top-left-radius: 4px;
-                border-top-right-radius: 4px;
-                font-weight: bold;
-            }
-            QTabBar::tab:selected {
-                background-color: white;
-                color: #2196F3;
-                border-bottom: 2px solid #2196F3;
-            }
-            QTabBar::tab:hover {
-                background-color: #e0e0e0;
-            }
-        """)
         
         # 预测结果标签页
         self.prediction_tab = self.create_image_tab("预测结果")
@@ -317,17 +210,17 @@ class FilmTrendAnalysisWidget(QWidget):
         tab_widget = QWidget()
         layout = QVBoxLayout(tab_widget)
         
-        # 图片显示区域
+        # 图片显示区域（深底：图像沉入背景，占位文字用暗色）
         image_display = QLabel()
         image_display.setAlignment(Qt.AlignCenter)
-        image_display.setStyleSheet("""
-            QLabel {
-                border: 1px solid #ccc;
+        image_display.setStyleSheet(f"""
+            QLabel {{
+                border: 1px solid {status_color('dim')};
                 border-radius: 4px;
-                background-color: white;
-                color: #666;
+                background-color: {GRAPHITE};
+                color: {status_color('dim')};
                 font-size: 14px;
-            }
+            }}
         """)
         image_display.setMinimumSize(400, 300)
         image_display.setText(f"暂无{tab_name}")
@@ -345,19 +238,10 @@ class FilmTrendAnalysisWidget(QWidget):
         tab_widget = QWidget()
         layout = QVBoxLayout(tab_widget)
         
-        # JSON文本显示区域
+        # JSON文本显示区域（等宽字体走全局 QSS：QTextEdit#jsonView）
         json_display = QTextEdit()
         json_display.setReadOnly(True)
-        json_display.setStyleSheet("""
-            QTextEdit {
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                background-color: white;
-                font-family: 'Courier New', monospace;
-                font-size: 11px;
-                color: #333;
-            }
-        """)
+        json_display.setObjectName("jsonView")
         json_display.setMinimumSize(400, 300)
         json_display.setText("暂无JSON结果")
         layout.addWidget(json_display)
@@ -373,12 +257,13 @@ class FilmTrendAnalysisWidget(QWidget):
         
         # 标题
         log_title = QLabel("系统日志")
-        log_title.setFont(QFont("Arial", 12, QFont.Bold))
+        log_title.setObjectName("sectionTitle")
         log_layout.addWidget(log_title)
-        
-        # 日志文本框
+
+        # 日志文本框（等宽字体走全局 QSS：QTextEdit#logView）
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
+        self.log_text.setObjectName("logView")
         self.log_text.setMaximumHeight(200)
         self.log_text.setMinimumHeight(150)
         log_layout.addWidget(self.log_text)
@@ -595,36 +480,9 @@ class FilmTrendAnalysisWidget(QWidget):
             msg_box.setIcon(QMessageBox.Warning)
             msg_box.setStandardButtons(QMessageBox.Ok)
             
-            # 设置弹窗尺寸，使其更宽
+            # 设置弹窗尺寸，使其更宽（样式走全局 QSS：QMessageBox 规则）
             msg_box.resize(400, 150)
-            
-            # 设置弹窗样式
-            msg_box.setStyleSheet("""
-                QMessageBox {
-                    background-color: white;
-                    font-size: 12px;
-                    min-width: 400px;
-                }
-                QMessageBox QLabel {
-                    color: #333;
-                    font-weight: bold;
-                    font-size: 14px;
-                }
-                QMessageBox QPushButton {
-                    background-color: #2196F3;
-                    color: white;
-                    border: none;
-                    padding: 10px 20px;
-                    border-radius: 4px;
-                    font-weight: bold;
-                    min-width: 100px;
-                    font-size: 12px;
-                }
-                QMessageBox QPushButton:hover {
-                    background-color: #1976D2;
-                }
-            """)
-            
+
             msg_box.exec_()
             
         except Exception as e:
@@ -702,6 +560,7 @@ class LogHandler(logging.Handler, QObject):
 
 def main():
     app = QApplication(sys.argv)
+    apply_theme(app)  # 独立调试入口与主窗口共用全局主题
     window = QMainWindow()
     window.setWindowTitle("镀膜褶皱趋势预测系统")
     window.setGeometry(100, 100, 1200, 800)

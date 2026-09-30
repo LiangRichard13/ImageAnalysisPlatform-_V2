@@ -8,8 +8,9 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QDialog, QListWidget, QListWidgetItem, QDialogButtonBox,
                              QLineEdit, QComboBox)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject, QSettings
-from PyQt5.QtGui import QPixmap, QFont
+from PyQt5.QtGui import QPixmap
 from utils.anomaly_detection_client import AnomalyDetectionClient, ENGINE_RULE_BASED, ENGINE_DINOMALY
+from ui_theme import apply_theme, status_color, GRAPHITE
 from dotenv import load_dotenv
 import tempfile
 import shutil
@@ -70,11 +71,11 @@ class CheckpointSelectionDialog(QDialog):
         
         # 标题和说明
         title_label = QLabel("请选择要使用的检查点文件：")
-        title_label.setFont(QFont("Arial", 12, QFont.Bold))
+        title_label.setObjectName("sectionTitle")
         layout.addWidget(title_label)
-        
+
         info_label = QLabel("检查点文件记录了之前批处理已处理的图片，选择后将继续处理未处理的图片。")
-        info_label.setStyleSheet("color: gray; font-size: 10px;")
+        info_label.setStyleSheet(f"color: {status_color('muted')}; font-size: 11px;")
         info_label.setWordWrap(True)
         layout.addWidget(info_label)
         
@@ -93,6 +94,7 @@ class CheckpointSelectionDialog(QDialog):
         self.use_selected_btn = QPushButton("使用选中检查点")
         self.use_selected_btn.clicked.connect(self.use_selected_checkpoint)
         self.use_selected_btn.setEnabled(False)
+        self.use_selected_btn.setObjectName("primaryBtn")
         button_layout.addWidget(self.use_selected_btn)
         
         self.create_new_btn = QPushButton("创建新检查点")
@@ -399,54 +401,23 @@ class AnomalyDetectionWidget(QWidget):
         
     def create_upload_area(self, parent_splitter):
         """创建图片上传区域"""
-        # 左侧容器
+        # 左侧容器（面板样式走全局 QSS：QFrame#panelCard）
         upload_frame = QFrame()
-        upload_frame.setFrameStyle(QFrame.StyledPanel)
+        upload_frame.setObjectName("panelCard")
+        upload_frame.setFrameStyle(QFrame.NoFrame)
         upload_layout = QVBoxLayout(upload_frame)
-        
+
         # 标题
         title_label = QLabel("图片上传区域")
-        title_label.setFont(QFont("Arial", 12, QFont.Bold))
+        title_label.setObjectName("sectionTitle")
         title_label.setAlignment(Qt.AlignCenter)
         upload_layout.addWidget(title_label)
 
-        # 新增输入控件的统一风格（与主色 #2196F3 圆角风格协调）
-        input_qss = """
-            QComboBox, QLineEdit {
-                border: 1px solid #ccc; border-radius: 4px;
-                padding: 4px 8px; background-color: white; color: #333;
-                font-size: 11px; min-height: 22px;
-            }
-            QComboBox:hover, QLineEdit:hover { border-color: #2196F3; }
-            QComboBox:focus, QLineEdit:focus { border: 1px solid #2196F3; }
-            QComboBox:disabled, QLineEdit:disabled {
-                background-color: #f0f0f0; color: #999; border: 1px solid #ddd;
-            }
-            QLineEdit[invalid="true"] { border: 1px solid #f44336; background-color: #FFF3F0; }
-            QComboBox QAbstractItemView {
-                background-color: white; border: 1px solid #ccc;
-                selection-background-color: #e3f2fd; selection-color: #1976D2;
-            }
-        """
-        ghost_btn_qss = """
-            QPushButton {
-                background-color: white; color: #2196F3;
-                border: 1px solid #2196F3; border-radius: 4px;
-                padding: 6px 12px; font-weight: bold; font-size: 11px;
-            }
-            QPushButton:hover { background-color: #e3f2fd; }
-            QPushButton:pressed { background-color: #bbdefb; }
-            QPushButton:disabled {
-                background-color: #f0f0f0; color: #999; border: 1px solid #ddd;
-            }
-        """
-
-        # 检测算法选择行
+        # 检测算法选择行（输入控件样式走全局 QSS）
         engine_row_layout = QHBoxLayout()
         engine_label = QLabel("检测算法:")
         engine_label.setMinimumWidth(70)
         self.engine_combo = QComboBox()
-        self.engine_combo.setStyleSheet(input_qss)
         self.engine_combo.addItem("规则化检测（快速）", ENGINE_RULE_BASED)
         self.engine_combo.addItem("深度学习检测（Dinomaly）", ENGINE_DINOMALY)
         saved_engine = self.settings.value("anomaly_engine", ENGINE_RULE_BASED)
@@ -461,72 +432,32 @@ class AnomalyDetectionWidget(QWidget):
         # 按钮行布局 - 选择图片和清空图片在同一行
         button_row_layout = QHBoxLayout()
         
-        # 上传按钮
+        # 上传按钮（次要操作：ghost 走全局默认按钮样式）
         self.upload_btn = QPushButton("选择图片")
         self.upload_btn.clicked.connect(self.select_image)
-        self.upload_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-                font-size: 11px;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-            QPushButton:pressed {
-                background-color: #3d8b40;
-            }
-        """)
         button_row_layout.addWidget(self.upload_btn)
-        
+
         # 清空按钮
         self.clear_btn = QPushButton("清空图片")
         self.clear_btn.clicked.connect(self.clear_image)
-        self.clear_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #f44336;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-                font-size: 11px;
-            }
-            QPushButton:hover {
-                background-color: #da190b;
-            }
-            QPushButton:pressed {
-                background-color: #c1170a;
-            }
-        """)
         button_row_layout.addWidget(self.clear_btn)
-        
+
         upload_layout.addLayout(button_row_layout)
-        
+
         # 当前图片显示区域
         image_info_frame = QFrame()
-        image_info_frame.setFrameStyle(QFrame.StyledPanel)
-        image_info_frame.setStyleSheet("""
-            QFrame {
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                background-color: white;
-                padding: 5px;
-            }
-        """)
+        image_info_frame.setObjectName("panelCard")
+        image_info_frame.setFrameStyle(QFrame.NoFrame)
         image_info_layout = QVBoxLayout(image_info_frame)
         image_info_layout.setContentsMargins(10, 10, 10, 10)
-        
+
         self.current_image_label = QLabel("当前图片:")
-        self.current_image_label.setFont(QFont("Arial", 10, QFont.Bold))
+        self.current_image_label.setObjectName("sectionTitle")
         image_info_layout.addWidget(self.current_image_label)
-        
+
         self.image_name_label = QLabel("未选择图片")
-        self.image_name_label.setStyleSheet("color: gray; font-style: italic; font-size: 10px;")
+        self.image_name_label.setStyleSheet(
+            f"color: {status_color('muted')}; font-style: italic; font-size: 11px;")
         self.image_name_label.setWordWrap(True)
         image_info_layout.addWidget(self.image_name_label)
         
@@ -534,69 +465,40 @@ class AnomalyDetectionWidget(QWidget):
         image_info_frame.setMinimumHeight(80)
         upload_layout.addWidget(image_info_frame)
         
-        # 处理按钮
+        # 处理按钮（本页主操作：primary）
         self.process_btn = QPushButton("开始处理")
         self.process_btn.clicked.connect(self.start_processing)
         self.process_btn.setEnabled(False)
-        self.process_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2196F3;
-                color: white;
-                border: none;
-                padding: 10px 20px;
-                border-radius: 4px;
-                font-weight: bold;
-                font-size: 12px;
-            }
-            QPushButton:hover:enabled {
-                background-color: #1976D2;
-            }
-            QPushButton:pressed:enabled {
-                background-color: #1565C0;
-            }
-            QPushButton:disabled {
-                background-color: #cccccc;
-                color: #666666;
-            }
-        """)
+        self.process_btn.setObjectName("primaryBtn")
         upload_layout.addWidget(self.process_btn)
-        
+
         # 进度条
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         upload_layout.addWidget(self.progress_bar)
-        
+
         # 批处理按钮区域
         batch_frame = QFrame()
-        batch_frame.setFrameStyle(QFrame.StyledPanel)
-        batch_frame.setStyleSheet("""
-            QFrame {
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                background-color: #f8f9fa;
-                padding: 5px;
-            }
-        """)
+        batch_frame.setObjectName("panelCard")
+        batch_frame.setFrameStyle(QFrame.NoFrame)
         batch_layout = QVBoxLayout(batch_frame)
         batch_layout.setContentsMargins(10, 10, 10, 10)
-        
+
         batch_title = QLabel("在线批处理")
-        batch_title.setFont(QFont("Arial", 10, QFont.Bold))
+        batch_title.setObjectName("sectionTitle")
         batch_layout.addWidget(batch_title)
 
-        # 监控文件夹选择行
+        # 监控文件夹选择行（输入控件样式走全局 QSS）
         dir_row_layout = QHBoxLayout()
         dir_label = QLabel("监控文件夹:")
         dir_label.setMinimumWidth(70)
         self.batch_dir_edit = QLineEdit()
-        self.batch_dir_edit.setStyleSheet(input_qss)
         self.batch_dir_edit.setPlaceholderText("选择或输入要监控的文件夹路径")
         self.batch_dir_edit.textChanged.connect(self._validate_batch_dir)
         saved_dir = self.settings.value("batch_monitor_dir", "") or os.getenv("ONLINE_PROCESSING_AD_DIR", "")
         if saved_dir:
             self.batch_dir_edit.setText(saved_dir)
         self.browse_btn = QPushButton("浏览...")
-        self.browse_btn.setStyleSheet(ghost_btn_qss)
         self.browse_btn.clicked.connect(self.browse_batch_dir)
         dir_row_layout.addWidget(dir_label)
         dir_row_layout.addWidget(self.batch_dir_edit, 1)
@@ -606,64 +508,25 @@ class AnomalyDetectionWidget(QWidget):
         # 批处理按钮行布局 - 启动和停止按钮在同一行
         batch_button_row_layout = QHBoxLayout()
         
-        # 启动批处理按钮
+        # 启动批处理按钮（shm 模式下文字被替换为"启动实时检测"，主操作：primary）
         self.start_batch_btn = QPushButton("启动在线批处理")
         self.start_batch_btn.clicked.connect(self.start_batch_processing)
-        self.start_batch_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #9C27B0;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-                font-size: 11px;
-            }
-            QPushButton:hover {
-                background-color: #7B1FA2;
-            }
-            QPushButton:pressed {
-                background-color: #6A1B9A;
-            }
-            QPushButton:disabled {
-                background-color: #cccccc;
-                color: #666666;
-            }
-        """)
+        self.start_batch_btn.setObjectName("primaryBtn")
         batch_button_row_layout.addWidget(self.start_batch_btn)
-        
-        # 终止批处理按钮
+
+        # 终止批处理按钮（危险操作：danger）
         self.stop_batch_btn = QPushButton("终止在线批处理")
         self.stop_batch_btn.clicked.connect(self.stop_batch_processing)
         self.stop_batch_btn.setEnabled(False)
-        self.stop_batch_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #FF5722;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-                font-size: 11px;
-            }
-            QPushButton:hover:enabled {
-                background-color: #E64A19;
-            }
-            QPushButton:pressed:enabled {
-                background-color: #D84315;
-            }
-            QPushButton:disabled {
-                background-color: #cccccc;
-                color: #666666;
-            }
-        """)
+        self.stop_batch_btn.setObjectName("dangerBtn")
         batch_button_row_layout.addWidget(self.stop_batch_btn)
-        
+
         batch_layout.addLayout(batch_button_row_layout)
-        
+
         # 批处理状态显示
         self.batch_status_label = QLabel("批处理状态: 未启动")
-        self.batch_status_label.setStyleSheet("color: gray; font-size: 10px;")
+        self.batch_status_label.setStyleSheet(
+            f"color: {status_color('dim')}; font-size: 11px;")
         batch_layout.addWidget(self.batch_status_label)
         
         batch_frame.setMaximumHeight(190)
@@ -673,32 +536,26 @@ class AnomalyDetectionWidget(QWidget):
         
         # 图片预览区域
         preview_frame = QFrame()
-        preview_frame.setFrameStyle(QFrame.StyledPanel)
-        preview_frame.setStyleSheet("""
-            QFrame {
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                background-color: white;
-            }
-        """)
+        preview_frame.setObjectName("panelCard")
+        preview_frame.setFrameStyle(QFrame.NoFrame)
         preview_layout = QVBoxLayout(preview_frame)
         preview_layout.setContentsMargins(5, 5, 5, 5)
-        
+
         preview_title = QLabel("图片预览")
-        preview_title.setFont(QFont("Arial", 10, QFont.Bold))
+        preview_title.setObjectName("sectionTitle")
         preview_title.setAlignment(Qt.AlignCenter)
         preview_layout.addWidget(preview_title)
-        
+
         self.image_preview = QLabel()
         self.image_preview.setAlignment(Qt.AlignCenter)
-        self.image_preview.setStyleSheet("""
-            QLabel {
-                border: 1px solid #ddd;
+        self.image_preview.setStyleSheet(f"""
+            QLabel {{
+                border: 1px solid {status_color('dim')};
                 border-radius: 4px;
-                background-color: #f9f9f9;
-                color: #999;
+                background-color: {GRAPHITE};
+                color: {status_color('dim')};
                 font-size: 12px;
-            }
+            }}
         """)
         self.image_preview.setMinimumSize(200, 150)
         self.image_preview.setMaximumSize(300, 200)
@@ -724,58 +581,18 @@ class AnomalyDetectionWidget(QWidget):
         # 标题和刷新按钮
         header_layout = QHBoxLayout()
         title_label = QLabel("处理结果展示")
-        title_label.setFont(QFont("Arial", 12, QFont.Bold))
+        title_label.setObjectName("sectionTitle")
         header_layout.addWidget(title_label)
-        
+        header_layout.addStretch()  # 标题左、按钮右：多余空间给弹性段，按钮不拉通栏
+
         self.refresh_btn = QPushButton("刷新页面")
         self.refresh_btn.clicked.connect(self.refresh_page)
-        self.refresh_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #FF9800;
-                color: white;
-                border: none;
-                padding: 6px 12px;
-                border-radius: 4px;
-                font-weight: bold;
-                font-size: 10px;
-            }
-            QPushButton:hover {
-                background-color: #F57C00;
-            }
-            QPushButton:pressed {
-                background-color: #EF6C00;
-            }
-        """)
         header_layout.addWidget(self.refresh_btn)
-        
+
         display_layout.addLayout(header_layout)
-        
-        # 创建标签页显示不同类型的结果
+
+        # 创建标签页显示不同类型的结果（样式走全局 QSS）
         self.result_tabs = QTabWidget()
-        self.result_tabs.setStyleSheet("""
-            QTabWidget::pane {
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                background-color: white;
-            }
-            QTabBar::tab {
-                background-color: #f0f0f0;
-                color: #333;
-                padding: 8px 16px;
-                margin-right: 2px;
-                border-top-left-radius: 4px;
-                border-top-right-radius: 4px;
-                font-weight: bold;
-            }
-            QTabBar::tab:selected {
-                background-color: white;
-                color: #2196F3;
-                border-bottom: 2px solid #2196F3;
-            }
-            QTabBar::tab:hover {
-                background-color: #e0e0e0;
-            }
-        """)
         
         # 预测结果标签页
         self.prediction_tab = self.create_image_tab("预测结果")
@@ -798,17 +615,17 @@ class AnomalyDetectionWidget(QWidget):
         tab_widget = QWidget()
         layout = QVBoxLayout(tab_widget)
         
-        # 图片显示区域
+        # 图片显示区域（深底：图像沉入背景，占位文字用暗色）
         image_display = QLabel()
         image_display.setAlignment(Qt.AlignCenter)
-        image_display.setStyleSheet("""
-            QLabel {
-                border: 1px solid #ccc;
+        image_display.setStyleSheet(f"""
+            QLabel {{
+                border: 1px solid {status_color('dim')};
                 border-radius: 4px;
-                background-color: white;
-                color: #666;
+                background-color: {GRAPHITE};
+                color: {status_color('dim')};
                 font-size: 14px;
-            }
+            }}
         """)
         image_display.setMinimumSize(400, 300)
         image_display.setText(f"暂无{tab_name}")
@@ -826,19 +643,10 @@ class AnomalyDetectionWidget(QWidget):
         tab_widget = QWidget()
         layout = QVBoxLayout(tab_widget)
         
-        # JSON文本显示区域
+        # JSON文本显示区域（等宽字体走全局 QSS：QTextEdit#jsonView）
         json_display = QTextEdit()
         json_display.setReadOnly(True)
-        json_display.setStyleSheet("""
-            QTextEdit {
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                background-color: white;
-                font-family: 'Courier New', monospace;
-                font-size: 11px;
-                color: #333;
-            }
-        """)
+        json_display.setObjectName("jsonView")
         json_display.setMinimumSize(400, 300)
         json_display.setText("暂无JSON结果")
         layout.addWidget(json_display)
@@ -854,12 +662,13 @@ class AnomalyDetectionWidget(QWidget):
         
         # 标题
         log_title = QLabel("系统日志")
-        log_title.setFont(QFont("Arial", 12, QFont.Bold))
+        log_title.setObjectName("sectionTitle")
         log_layout.addWidget(log_title)
-        
-        # 日志文本框
+
+        # 日志文本框（等宽字体走全局 QSS：QTextEdit#logView）
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
+        self.log_text.setObjectName("logView")
         self.log_text.setMaximumHeight(200)
         self.log_text.setMinimumHeight(150)
         log_layout.addWidget(self.log_text)
@@ -942,7 +751,7 @@ class AnomalyDetectionWidget(QWidget):
         self.stop_batch_btn.setToolTip("终止共享内存实时检测链路（IPC_MODE=shm）")
 
         self.shm_status_label = QLabel("实时链路: 未启动")
-        self.shm_status_label.setStyleSheet("color: gray; font-size: 10px;")
+        self.shm_status_label.setStyleSheet(f"color: {status_color('dim')}; font-size: 11px;")
         self.shm_status_label.setWordWrap(True)
         self._batch_layout.addWidget(self.shm_status_label)
 
@@ -954,10 +763,10 @@ class AnomalyDetectionWidget(QWidget):
         self.stop_batch_btn.setEnabled(running)
         if running:
             self.batch_status_label.setText("批处理状态: 实时检测运行中")
-            self.batch_status_label.setStyleSheet("color: green; font-size: 10px;")
+            self.batch_status_label.setStyleSheet(f"color: {status_color('ok')}; font-size: 11px;")
         else:
             self.batch_status_label.setText("批处理状态: 实时检测已停止")
-            self.batch_status_label.setStyleSheet("color: gray; font-size: 10px;")
+            self.batch_status_label.setStyleSheet(f"color: {status_color('dim')}; font-size: 11px;")
 
     def _start_ingest_thread(self):
         """创建并启动实时链路线程（shm 启动按钮专用）。
@@ -992,7 +801,7 @@ class AnomalyDetectionWidget(QWidget):
         self.start_batch_btn.setEnabled(False)
         self.stop_batch_btn.setEnabled(False)
         self.batch_status_label.setText("批处理状态: 正在停止实时检测...")
-        self.batch_status_label.setStyleSheet("color: orange; font-size: 10px;")
+        self.batch_status_label.setStyleSheet(f"color: {status_color('warn')}; font-size: 11px;")
         QApplication.processEvents()  # 长推理收尾期间界面短暂无响应，先让文案上屏
 
         def _poll_stopped():
@@ -1003,7 +812,7 @@ class AnomalyDetectionWidget(QWidget):
                 self._ingest_thread = None
             self._set_switch_state(running=False)
             self.shm_status_label.setText("实时链路: 已停止")
-            self.shm_status_label.setStyleSheet("color: gray; font-size: 10px;")
+            self.shm_status_label.setStyleSheet(f"color: {status_color('dim')}; font-size: 11px;")
             logger.info("实时检测已停止")
 
         QTimer.singleShot(200, _poll_stopped)
@@ -1042,7 +851,7 @@ class AnomalyDetectionWidget(QWidget):
         self.shm_status_label.setText(
             f"实时链路: {'在线' if online else '源离线（等待生产者心跳）'}")
         self.shm_status_label.setStyleSheet(
-            f"color: {'green' if online else '#f44336'}; font-size: 10px;")
+            f"color: {status_color('ok') if online else status_color('alarm')}; font-size: 11px;")
 
     def _on_shm_stats(self, frame_seq, result_seq, dropped_lag, dropped_overwrite):
         self.shm_status_label.setText(
@@ -1125,7 +934,7 @@ class AnomalyDetectionWidget(QWidget):
             self.start_batch_btn.setEnabled(False)
             self.stop_batch_btn.setEnabled(True)
             self.batch_status_label.setText("批处理状态: 运行中")
-            self.batch_status_label.setStyleSheet("color: green; font-size: 10px;")
+            self.batch_status_label.setStyleSheet(f"color: {status_color('ok')}; font-size: 11px;")
             
             logger.info(f"在线批处理已启动，监控文件夹: {processing_dir}")
             
@@ -1147,7 +956,7 @@ class AnomalyDetectionWidget(QWidget):
             self.start_batch_btn.setEnabled(False)
             self.stop_batch_btn.setEnabled(False)
             self.batch_status_label.setText("批处理状态: 正在停止...")
-            self.batch_status_label.setStyleSheet("color: orange; font-size: 10px;")
+            self.batch_status_label.setStyleSheet(f"color: {status_color('warn')}; font-size: 11px;")
             
             # 设置超时检查，如果10秒后线程仍在运行，强制终止
             QTimer.singleShot(10000, self.check_batch_thread_timeout)
@@ -1176,7 +985,7 @@ class AnomalyDetectionWidget(QWidget):
         self.engine_combo.setEnabled(True)
         self.update_process_button_state()
         self.batch_status_label.setText("批处理状态: 已停止")
-        self.batch_status_label.setStyleSheet("color: gray; font-size: 10px;")
+        self.batch_status_label.setStyleSheet(f"color: {status_color('dim')}; font-size: 11px;")
         logger.info("批处理已停止")
     
     def on_batch_image_processed(self, prediction_path, heatmap_path, json_path):
@@ -1219,7 +1028,8 @@ class AnomalyDetectionWidget(QWidget):
             if self.validate_image_format(file_path):
                 self.image_path = file_path
                 self.image_name_label.setText(os.path.basename(file_path))
-                self.image_name_label.setStyleSheet("color: black; font-weight: bold;")
+                self.image_name_label.setStyleSheet(
+                    f"color: {status_color('hi')}; font-weight: bold; font-size: 11px;")
                 
                 # 显示图片预览
                 self.display_image_preview(file_path)
@@ -1265,7 +1075,8 @@ class AnomalyDetectionWidget(QWidget):
         """清空图片"""
         self.image_path = None
         self.image_name_label.setText("未选择图片")
-        self.image_name_label.setStyleSheet("color: gray; font-style: italic;")
+        self.image_name_label.setStyleSheet(
+            f"color: {status_color('muted')}; font-style: italic; font-size: 11px;")
         
         # 清空图片预览
         self.image_preview.clear()
@@ -1463,35 +1274,8 @@ class AnomalyDetectionWidget(QWidget):
             msg_box.setIcon(QMessageBox.Warning)
             msg_box.setStandardButtons(QMessageBox.Ok)
 
-            # 设置弹窗尺寸，使其更宽
+            # 设置弹窗尺寸，使其更宽（样式走全局 QSS：QMessageBox 规则）
             msg_box.resize(400, 150)
-
-            # 设置弹窗样式
-            msg_box.setStyleSheet("""
-                QMessageBox {
-                    background-color: white;
-                    font-size: 12px;
-                    min-width: 400px;
-                }
-                QMessageBox QLabel {
-                    color: #333;
-                    font-weight: bold;
-                    font-size: 14px;
-                }
-                QMessageBox QPushButton {
-                    background-color: #2196F3;
-                    color: white;
-                    border: none;
-                    padding: 10px 20px;
-                    border-radius: 4px;
-                    font-weight: bold;
-                    min-width: 100px;
-                    font-size: 12px;
-                }
-                QMessageBox QPushButton:hover {
-                    background-color: #1976D2;
-                }
-            """)
 
             if auto_close_ms > 0:
                 # 非模态显示并定时关闭，避免批处理时弹窗堆积阻塞操作
@@ -1593,6 +1377,7 @@ class LogHandler(logging.Handler, QObject):
 
 def main():
     app = QApplication(sys.argv)
+    apply_theme(app)  # 独立调试入口与主窗口共用全局主题
     window = QMainWindow()
     window.setWindowTitle("异常检测系统")
     window.setGeometry(100, 100, 1400, 900)
