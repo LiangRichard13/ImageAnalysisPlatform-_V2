@@ -32,3 +32,8 @@ Thumbs.db
 # ---- 本地工具 ----
 # tools/ 已改为共享内存诊断/桥接工具源码目录，不再忽略
 .claude/
+
+# ---- 打包产物（PyInstaller）----
+build/
+dist/
+*.spec.bak
