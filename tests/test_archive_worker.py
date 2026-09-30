@@ -9,7 +9,7 @@ from utils.anomaly_detection_client import AnomalyDetectionClient, ENGINE_RULE_B
 from utils.archive_worker import ArchiveItem, ArchiveWorker
 from utils.rule_based_wrinkle import cvt2heatmap
 
-IMG_DIR = __import__("pathlib").Path(__file__).resolve().parent.parent / "test"
+IMG_DIR = __import__("pathlib").Path(__file__).resolve().parent.parent / "test_images"
 
 
 def _real_gray() -> np.ndarray:

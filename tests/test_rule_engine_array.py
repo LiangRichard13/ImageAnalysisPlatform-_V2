@@ -6,7 +6,7 @@ import numpy as np
 
 from utils.rule_based_wrinkle import RuleBasedWrinklePipeline, cvt2heatmap
 
-IMG_DIR = Path(__file__).resolve().parent.parent / "test"
+IMG_DIR = Path(__file__).resolve().parent.parent / "test_images"
 
 
 def _ensure_image():
