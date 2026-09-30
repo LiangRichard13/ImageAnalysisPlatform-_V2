@@ -38,12 +38,16 @@ a = Analysis(
     binaries=timm_binaries,
     datas=core_datas + timm_datas,
     hiddenimports=[
-        # 动态导入链（models/dataloader/utils_ 等 core 包）引用的第三方库
+        # 动态导入链（models/dataloader/utils_ 等 core 包）引用的第三方库，
+        # 按 core/*.py 的 import 语句精确收集（延迟导入静态分析不到）
         'torchinfo',
         'sklearn',
         'sklearn.utils._weight_vector',
-        'skimage',
-        'scipy',
+        'sklearn.cluster',
+        'sklearn.metrics',
+        'skimage.measure',
+        'scipy.interpolate',
+        'scipy.ndimage',
         'pandas',
         'PIL',
     ] + timm_hiddenimports,

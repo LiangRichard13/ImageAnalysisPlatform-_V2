@@ -243,12 +243,27 @@ def _run_smoke_check() -> int:
     """打包冒烟：核心导入 → dinomaly 权重加载 → 规则引擎推理。
 
     windowed exe 无 stdout，输出双写 exe 旁 _smoke_result.txt。
+    torch 导入失败时输出进程诊断（PATH/已加载模块/逐 DLL 加载），
+    用于定位打包环境特有的 DLL 初始化问题。
     """
     lines = []
 
     def say(msg):
         lines.append(msg)
         print(msg, flush=True)
+
+    def _report_loaded_modules():
+        import ctypes.wintypes as wt
+        psapi = ctypes.WinDLL("psapi.dll")
+        hmods = (wt.HMODULE * 1024)()
+        needed = wt.DWORD()
+        proc = ctypes.WinDLL("kernel32.dll").GetCurrentProcess()
+        if psapi.EnumProcessModules(proc, hmods, ctypes.sizeof(hmods), ctypes.byref(needed)):
+            count = min(needed.value // ctypes.sizeof(wt.HMODULE), 1024)
+            buf = ctypes.create_unicode_buffer(512)
+            for i in range(count):
+                if psapi.GetModuleFileNameExW(proc, hmods[i], buf, 512):
+                    say(f"  loaded: {buf.value}")
 
     try:
         say("[SMOKE] import torch/cv2 ...")
@@ -266,9 +281,25 @@ def _run_smoke_check() -> int:
         say("[SMOKE] rule engine OK -> SMOKE_PASS")
         code = 0
     except Exception as exc:
+        import ctypes
+        import glob
+        import os
         import traceback
         say(f"[SMOKE] FAILED: {exc}")
         lines.extend(traceback.format_exc().splitlines())
+        # ---- 进程诊断：定位打包环境特有的 DLL 初始化问题 ----
+        say("[DIAG] PATH=" + os.environ.get("PATH", ""))
+        say("[DIAG] loaded modules:")
+        try:
+            _report_loaded_modules()
+        except Exception as e:
+            say(f"  (enum failed: {e})")
+        lib = os.path.join(getattr(sys, "_MEIPASS", ""), "torch", "lib")
+        for p in sorted(glob.glob(os.path.join(lib, "*.dll"))):
+            try:
+                ctypes.WinDLL(p, winmode=0x1100)
+            except OSError as e:
+                say(f"[DIAG] DLLFAIL {os.path.basename(p)}: {e}")
         code = 1
     try:
         (Path(sys.executable).parent / "_smoke_result.txt").write_text(

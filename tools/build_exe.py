@@ -45,9 +45,38 @@ def build() -> None:
     ], cwd=str(ROOT))
 
 
+def fix_dll_conflicts() -> None:
+    """清理 PyInstaller 收集的旧版运行时，统一走 System32。
+
+    根因（WinError 1114 / c10.dll 初始化失败）：PyQt5 wheel 自带的
+    MSVCP140/VCRUNTIME140 为 14.26（2020 年），经由 hook 注册的搜索
+    目录抢先于 System32 被加载，torch 2.11 绑定其缺失的新导出即崩。
+    删除后 Qt 回落 System32（14.50 向后兼容）。conda 的 UCRT stub
+    （api-ms-win-*）与 ucrtbase.dll 同理一并清理，减重且防劫持。
+    """
+    internal = OUT / "_internal"
+    qt_bin = internal / "PyQt5" / "Qt5" / "bin"
+    removed = 0
+    if qt_bin.is_dir():
+        for name in ("MSVCP140.dll", "VCRUNTIME140.dll", "VCRUNTIME140_1.dll"):
+            f = qt_bin / name
+            if f.exists():
+                f.unlink()
+                removed += 1
+    for f in internal.glob("api-ms-win-*.dll"):
+        f.unlink()
+        removed += 1
+    ucrt = internal / "ucrtbase.dll"
+    if ucrt.exists():
+        ucrt.unlink()
+        removed += 1
+    print(f"[BUILD] removed {removed} conflicting runtime DLLs (PyQt5 CRT 14.26 / UCRT stubs)")
+
+
 def post_copy() -> None:
     if not OUT.is_dir():
         sys.exit(f"[BUILD] 产物目录不存在: {OUT}（先完成构建）")
+    fix_dll_conflicts()
     wdir = OUT / "weights"
     wdir.mkdir(exist_ok=True)
     print("[BUILD] copying external weights ...")
