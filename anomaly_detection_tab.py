@@ -26,6 +26,28 @@ logger = logging.getLogger(__name__)
 # closeEvent 时仍未退出的 ingest 线程转入此处保活（防 QThread 销毁崩溃）
 _KEEPALIVE_THREADS = []
 
+# 预览源图最长边上限：resize 重算只需预览级分辨率，避免全尺寸帧常驻内存
+PREVIEW_SOURCE_MAX_W = 1600
+# 弹性预览框的最低高度（长图为宽度占满的扁条；框体吸收左列余量）
+PREVIEW_MIN_H = 48
+
+
+class _PreviewLabel(QLabel):
+    """尺寸变化时按图片比例重算缩放的预览 QLabel（弹性视窗）。
+
+    框体高度由布局分配（Expanding 吸收左列余量），图在框内等比居中；
+    无固定高度，故 resizeEvent 重算不存在自适应循环。
+    """
+
+    def __init__(self, on_resized):
+        super().__init__()
+        self._on_resized = on_resized
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._on_resized()
+
+
 class ImageProcessingThread(QThread):
     """图片处理线程"""
     finished = pyqtSignal(str, str, str)  # 处理完成信号，传递三个结果文件路径
@@ -374,7 +396,7 @@ class AnomalyDetectionWidget(QWidget):
         self.create_log_area(main_splitter)
         
         # 设置分割器比例
-        main_splitter.setSizes([700, 200])
+        main_splitter.setSizes([650, 250])  # 日志区更高：左列弹性预览可吸收余量
         
     def create_image_processing_area(self, parent_splitter):
         """创建图片处理区域"""
@@ -547,7 +569,10 @@ class AnomalyDetectionWidget(QWidget):
         preview_title.setAlignment(Qt.AlignCenter)
         preview_layout.addWidget(preview_title)
 
-        self.image_preview = QLabel()
+        # 弹性预览视窗：高度 Expanding 吸收左列分割器余量（空白收进
+        # 有边框的预览框，不再是页面尾部废空间）；图在框内等比居中，
+        # 长图为宽度占满的扁条、普通图自动放大
+        self.image_preview = _PreviewLabel(self._apply_preview_size)
         self.image_preview.setAlignment(Qt.AlignCenter)
         self.image_preview.setStyleSheet(f"""
             QLabel {{
@@ -558,20 +583,17 @@ class AnomalyDetectionWidget(QWidget):
                 font-size: 12px;
             }}
         """)
-        # 扁条预览区：宽随面板伸缩、高固定——线阵长图等比完整显示，
-        # 宽度利用率 100%（原 300×200 框内长图仅 ~9px 高、四周大片空白）
         self.image_preview.setMinimumWidth(200)
-        self.image_preview.setFixedHeight(48)
+        self.image_preview.setMinimumHeight(PREVIEW_MIN_H)
+        from PyQt5.QtWidgets import QSizePolicy
+        self.image_preview.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.image_preview.setText("暂无图片预览")
         preview_layout.addWidget(self.image_preview)
         
-        preview_frame.setMaximumHeight(110)
         preview_frame.setMinimumHeight(90)
         upload_layout.addWidget(preview_frame)
-        
-        # 添加弹性空间
-        upload_layout.addStretch()
-        
+
+        # 无 addStretch：预览视窗（Expanding）吸收左列余量，空白收进框内
         parent_splitter.addWidget(upload_frame)
         
     def create_display_area(self, parent_splitter):
@@ -827,9 +849,8 @@ class AnomalyDetectionWidget(QWidget):
         if json_display:
             json_display.setText(json.dumps(payload, ensure_ascii=False, indent=2))
         self.check_anomaly_level(payload)
-        # 预览区：当前帧缩略
-        self.image_preview.setPixmap(QPixmap.fromImage(gray_img).scaled(
-            self.image_preview.size(), Qt.KeepAspectRatio, Qt.FastTransformation))
+        # 预览区：当前帧缩略（高度随帧比例自适应，长图为宽度占满的扁条）
+        self._set_preview_image(gray_img)
         self._display_qimage(self.prediction_tab, pred_img, "预测结果")
         self._display_qimage(self.heatmap_tab, heat_img, "热力图")
         logger.info(f"实时链路结果 frame_seq={frame_seq} "
@@ -1048,15 +1069,7 @@ class AnomalyDetectionWidget(QWidget):
             if os.path.exists(image_path):
                 pixmap = QPixmap(image_path)
                 if not pixmap.isNull():
-                    # 计算预览尺寸，保持宽高比
-                    preview_size = self.image_preview.size()
-                    scaled_pixmap = pixmap.scaled(
-                        preview_size.width() - 10,  # 留出边框空间
-                        preview_size.height() - 10,
-                        Qt.KeepAspectRatio,
-                        Qt.SmoothTransformation
-                    )
-                    self.image_preview.setPixmap(scaled_pixmap)
+                    self._set_preview_image(pixmap.toImage(), smooth=True)
                     logger.info(f"显示图片预览: {os.path.basename(image_path)}")
                 else:
                     self.image_preview.setText("无法加载图片预览")
@@ -1067,6 +1080,31 @@ class AnomalyDetectionWidget(QWidget):
         except Exception as e:
             logger.error(f"显示图片预览失败: {str(e)}")
             self.image_preview.setText("预览加载失败")
+
+    def _set_preview_image(self, qimg, smooth: bool = False):
+        """预览入口：保存源图并按图片比例自适应预览高度。
+
+        源图最长边超过 PREVIEW_SOURCE_MAX_W 时先等比降采样——宽度变化
+        重算只需预览级分辨率，避免全尺寸帧 QPixmap 常驻内存。
+        """
+        if qimg is None or qimg.isNull():
+            return
+        if qimg.width() > PREVIEW_SOURCE_MAX_W or qimg.height() > PREVIEW_SOURCE_MAX_W:
+            qimg = qimg.scaled(PREVIEW_SOURCE_MAX_W, PREVIEW_SOURCE_MAX_W,
+                               Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._preview_source = qimg
+        self._apply_preview_size(smooth=smooth)
+
+    def _apply_preview_size(self, smooth: bool = False):
+        """按预览框当前尺寸缩放贴图（等比居中，框体尺寸由布局分配）。"""
+        image = getattr(self, "_preview_source", None)
+        if image is None or image.isNull():
+            return
+        w = max(self.image_preview.width() - 10, 40)   # 留出边框空间
+        h = max(self.image_preview.height() - 10, PREVIEW_MIN_H)
+        mode = Qt.SmoothTransformation if smooth else Qt.FastTransformation
+        self.image_preview.setPixmap(QPixmap.fromImage(image).scaled(
+            w, h, Qt.KeepAspectRatio, mode))
             
     def validate_image_format(self, file_path):
         """验证图片格式"""
@@ -1081,7 +1119,8 @@ class AnomalyDetectionWidget(QWidget):
         self.image_name_label.setStyleSheet(
             f"color: {status_color('muted')}; font-style: italic; font-size: 11px;")
         
-        # 清空图片预览
+        # 清空图片预览（源图引用一并释放）
+        self._preview_source = None
         self.image_preview.clear()
         self.image_preview.setText("暂无图片预览")
         
