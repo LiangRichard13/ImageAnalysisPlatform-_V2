@@ -1409,18 +1409,33 @@ class AnomalyDetectionWidget(QWidget):
                 json_display.setText(f"JSON结果显示错误: {str(e)}")
     
     def check_anomaly_level(self, json_data):
-        """检查异常级别并弹出警告窗口"""
+        """检查异常级别并弹出警告窗口（ANOMALY_ALERT_POPUP_ENABLED=0 时仅记日志）"""
         try:
             anomaly_level = json_data.get('anomaly_level', '')
-            
+
             # 检查是否为需要弹出警告的异常级别
             if anomaly_level in ['中等异常可能性', '很可能异常']:
+                if not self._alerts_popup_enabled():
+                    logger.info(f"检测到异常级别: {anomaly_level}"
+                                f"（弹窗已禁用：ANOMALY_ALERT_POPUP_ENABLED=0，仅记录日志）")
+                    return
                 self.show_anomaly_warning(anomaly_level, json_data)
                 logger.info(f"检测到异常级别: {anomaly_level}，已弹出警告窗口")
-                
+
         except Exception as e:
             logger.error(f"检查异常级别失败: {str(e)}")
-    
+
+    def _alerts_popup_enabled(self):
+        """读取异常警告弹窗开关，默认开启；1/true/yes/on 开，0/false/no/off 关"""
+        raw_value = os.getenv('ANOMALY_ALERT_POPUP_ENABLED', '1')
+        value = raw_value.strip().lower()
+        if value in ('1', 'true', 'yes', 'on'):
+            return True
+        if value in ('0', 'false', 'no', 'off'):
+            return False
+        logger.warning(f"ANOMALY_ALERT_POPUP_ENABLED 配置无效: {raw_value}，使用默认值开启")
+        return True
+
     def _get_alert_auto_close_ms(self):
         """读取警告弹窗自动关闭时长配置，0或负数表示不自动关闭"""
         raw_value = os.getenv('ANOMALY_ALERT_AUTO_CLOSE_MS', '5000')
