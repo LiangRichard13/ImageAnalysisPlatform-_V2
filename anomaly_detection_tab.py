@@ -930,30 +930,83 @@ class AnomalyDetectionWidget(QWidget):
         if self._ipc_mode != "shm":
             return
 
-        logger.info("IPC_MODE=shm：文件轮询批处理由实时链路接管")
-        self.start_batch_btn.setEnabled(False)
+        logger.info("IPC_MODE=shm：启停按钮切换为实时检测开关（无自动启动）")
+        # 目录输入/浏览维持置灰：实时链路无需监控文件夹
         self.batch_dir_edit.setEnabled(False)
         self.browse_btn.setEnabled(False)
         self.batch_dir_edit.setToolTip("实时链路模式（IPC_MODE=shm）无需监控文件夹")
-        self.batch_status_label.setText("批处理状态: 由实时链路接管（IPC_MODE=shm）")
-        self.batch_status_label.setStyleSheet("color: purple; font-size: 10px;")
+        # 启停两按钮改作实时检测开关：文案随之切换，避免与 file 批处理语义混淆
+        self.start_batch_btn.setText("启动实时检测")
+        self.stop_batch_btn.setText("终止实时检测")
+        self.start_batch_btn.setToolTip("启动共享内存实时检测链路（IPC_MODE=shm）")
+        self.stop_batch_btn.setToolTip("终止共享内存实时检测链路（IPC_MODE=shm）")
 
-        from utils.anomaly_detection_client import ENGINE_RULE_BASED
-        from utils.shm_ingest import SharedMemoryIngestThread
-
-        self.shm_status_label = QLabel("实时链路: 初始化...")
+        self.shm_status_label = QLabel("实时链路: 未启动")
         self.shm_status_label.setStyleSheet("color: gray; font-size: 10px;")
         self.shm_status_label.setWordWrap(True)
         self._batch_layout.addWidget(self.shm_status_label)
 
-        self._ingest_thread = SharedMemoryIngestThread(
+        self._set_switch_state(running=False)
+
+    def _set_switch_state(self, running: bool):
+        """shm 开关态：两按钮可用性 + 批处理状态行文案。"""
+        self.start_batch_btn.setEnabled(not running)
+        self.stop_batch_btn.setEnabled(running)
+        if running:
+            self.batch_status_label.setText("批处理状态: 实时检测运行中")
+            self.batch_status_label.setStyleSheet("color: green; font-size: 10px;")
+        else:
+            self.batch_status_label.setText("批处理状态: 实时检测已停止")
+            self.batch_status_label.setStyleSheet("color: gray; font-size: 10px;")
+
+    def _start_ingest_thread(self):
+        """创建并启动实时链路线程（shm 启动按钮专用）。
+
+        引擎取 combo 当前值：停止期间切换引擎后重启自然生效。
+        """
+        from utils.anomaly_detection_client import ENGINE_RULE_BASED
+        from utils.shm_ingest import SharedMemoryIngestThread
+
+        thread = SharedMemoryIngestThread(
             engine_name=self.engine_combo.currentData() or ENGINE_RULE_BASED)
-        self._ingest_thread.result_ready.connect(self._on_shm_result)
-        self._ingest_thread.source_online.connect(self._on_shm_online)
-        self._ingest_thread.stats.connect(self._on_shm_stats)
-        self._ingest_thread.archive_dropped.connect(self._on_shm_archive_dropped)
-        self._ingest_thread.error.connect(lambda msg: logger.error(msg))
-        self._ingest_thread.start()
+        thread.result_ready.connect(self._on_shm_result)
+        thread.source_online.connect(self._on_shm_online)
+        thread.stats.connect(self._on_shm_stats)
+        thread.archive_dropped.connect(self._on_shm_archive_dropped)
+        thread.error.connect(lambda msg: logger.error(msg))
+        thread.start()
+        self._ingest_thread = thread
+
+    def _stop_ingest_thread(self):
+        """非阻塞停止实时链路线程：轮询至完全退出后才恢复启动按钮。
+
+        dinomaly 长推理可能超 15s，GUI 线程不能 wait()；线程完全退出
+        （run() finally 释放 IAP_ANALYZER_MUTEX）后才允许再次启动，
+        规避互斥体竞态。stop 标志挂所有等待点，线程 ≤ 一次 fetch/推理
+        周期内必然退出，轮询无需超时；窗口关闭由 closeEvent 兜底。
+        """
+        thread = self._ingest_thread
+        if thread is None:
+            return
+        thread.stop()
+        self.start_batch_btn.setEnabled(False)
+        self.stop_batch_btn.setEnabled(False)
+        self.batch_status_label.setText("批处理状态: 正在停止实时检测...")
+        self.batch_status_label.setStyleSheet("color: orange; font-size: 10px;")
+        QApplication.processEvents()  # 长推理收尾期间界面短暂无响应，先让文案上屏
+
+        def _poll_stopped():
+            if thread.isRunning():
+                QTimer.singleShot(200, _poll_stopped)
+                return
+            if self._ingest_thread is thread:
+                self._ingest_thread = None
+            self._set_switch_state(running=False)
+            self.shm_status_label.setText("实时链路: 已停止")
+            self.shm_status_label.setStyleSheet("color: gray; font-size: 10px;")
+            logger.info("实时检测已停止")
+
+        QTimer.singleShot(200, _poll_stopped)
 
     def _on_shm_result(self, frame_seq, payload, gray_img, pred_img, heat_img):
         """实时结果：帧预览 + 预测图/热力图 + JSON + 异常级别告警。"""
@@ -1001,11 +1054,13 @@ class AnomalyDetectionWidget(QWidget):
         logger.warning(f"归档队列溢出，累计丢弃 {count} 件（实时链路不受影响）")
 
     def start_batch_processing(self):
-        """启动在线批处理"""
+        """启动在线批处理（shm 模式下为实时检测启动开关）"""
         if getattr(self, "_ipc_mode", "file") == "shm":
-            QMessageBox.information(self, "实时链路模式",
-                                    "当前 IPC_MODE=shm，文件轮询批处理已由共享内存实时链路接管。\n"
-                                    "如需恢复，请将 .env 中 IPC_MODE 改为 file 后重启。")
+            if self._ingest_thread is not None and self._ingest_thread.isRunning():
+                return  # 已在运行（双击安全）
+            self._start_ingest_thread()
+            self._set_switch_state(running=True)
+            logger.info("实时检测已启动（IPC_MODE=shm）")
             return
         try:
             # 从界面读取监控文件夹
@@ -1080,7 +1135,10 @@ class AnomalyDetectionWidget(QWidget):
             QMessageBox.critical(self, "启动失败", error_msg)
     
     def stop_batch_processing(self):
-        """停止在线批处理"""
+        """停止在线批处理（shm 模式下为实时检测停止开关）"""
+        if getattr(self, "_ipc_mode", "file") == "shm":
+            self._stop_ingest_thread()
+            return
         if self.batch_thread and self.batch_thread.isRunning():
             self.batch_thread.stop()
             logger.info("正在停止批处理...")

@@ -115,7 +115,7 @@ def test_ingest_full_pipeline(tmp_path):
 
 
 _WIDGET_SMOKE = r"""
-import os, sys
+import os, sys, time
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 os.environ["IPC_MODE"] = "shm"
 sys.path.insert(0, ".")
@@ -137,17 +137,20 @@ de.preload_dinomaly_engine_async = lambda: preload_calls.append(1) and None
 app = QApplication([])
 widget = tab_mod.AnomalyDetectionWidget()
 assert widget._ipc_mode == "shm", widget._ipc_mode
-# 批处理面板整体置灰：监控自动运行，无需任何启动操作
-assert widget.start_batch_btn.isEnabled() is False
+# 开关语义：无自动启动——初始停止态，启停完全由两个按钮决定
+assert widget._ingest_thread is None
+assert widget.start_batch_btn.isEnabled() is True
+assert widget.stop_batch_btn.isEnabled() is False
+assert "实时检测" in widget.start_batch_btn.text(), widget.start_batch_btn.text()
+assert "实时检测" in widget.stop_batch_btn.text(), widget.stop_batch_btn.text()
 assert widget.batch_dir_edit.isEnabled() is False
 assert widget.browse_btn.isEnabled() is False
-assert widget._ingest_thread is not None
 assert hasattr(widget, "shm_status_label")
 # 上传区保持可用：单张选图检测与实时链路无关
 assert widget.upload_btn.isEnabled() is True
 assert widget.process_btn.isEnabled() is False  # 未选图时禁用（正常语义）
 
-# 视觉置灰：自定义 QSS 不得覆盖禁用态（渲染像素非白底/非紫底）
+# 视觉置灰：自定义 QSS 不得覆盖禁用态（渲染像素非白底）
 def _bg_lightness(w):
     img = w.grab().toImage()
     xs = range(3, img.width() - 3, max(1, (img.width() - 6) // 8))
@@ -157,8 +160,6 @@ assert _bg_lightness(widget.batch_dir_edit) < 253, \
     f"输入框禁用态仍为白底: {_bg_lightness(widget.batch_dir_edit)}"
 assert _bg_lightness(widget.browse_btn) < 253, \
     f"浏览按钮禁用态仍为白底: {_bg_lightness(widget.browse_btn)}"
-assert _bg_lightness(widget.start_batch_btn) < 253, \
-    f"启动按钮禁用态仍为紫底: {_bg_lightness(widget.start_batch_btn)}"
 
 # 预热接线：combo 置 rule 不预热；切 dinomaly 恰好预热一次
 widget.engine_combo.setCurrentIndex(0)  # rule（经 on_engine_changed）
@@ -167,13 +168,49 @@ assert preload_calls == [], "rule 引擎不应预热"
 widget.engine_combo.setCurrentIndex(1)  # dinomaly（经 on_engine_changed 自动预热）
 assert preload_calls == [1], f"切 dinomaly 应恰好预热一次，got {preload_calls}"
 
-# 模式守卫：start_batch_processing 直接短路返回（无头环境打桩掉模态弹窗）
-tab_mod.QMessageBox.information = lambda *a, **k: None
+
+def _spin_until(cond, timeout_s=20):
+    # QTimer 轮询依赖事件循环：processEvents+sleep 驱动直到条件成立
+    # （脚本内禁用三引号 docstring——会终止外层 _WIDGET_SMOKE 字符串）
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if cond():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+# 开关流程：启动 → 运行态（start 置灰 / stop 可用）
 widget.start_batch_processing()
-# 未 show 的 widget 不触发 closeEvent——显式停线程，否则 QThread 携
-# ctypes 视图存活到解释器退出会段错误
-widget._ingest_thread.stop()
-widget._ingest_thread.wait(15000)
+th1 = widget._ingest_thread
+assert th1 is not None and th1.isRunning(), "启动按钮未创建实时链路线程"
+assert widget.start_batch_btn.isEnabled() is False
+assert widget.stop_batch_btn.isEnabled() is True
+
+# 停止 → 轮询至线程完全退出后才恢复启动钮（规避 ANALYZER_MUTEX 竞态）
+widget.stop_batch_processing()
+assert widget._ingest_thread is not None, "停止过程中线程引用不得提前置 None"
+assert _spin_until(lambda: widget._ingest_thread is None
+                   and widget.start_batch_btn.isEnabled()
+                   and not widget.stop_batch_btn.isEnabled()), "停止轮询超时"
+assert not th1.isRunning()
+
+# 可反复开关：再启动一次
+widget.start_batch_processing()
+th2 = widget._ingest_thread
+assert th2 is not None and th2 is not th1 and th2.isRunning()
+assert widget.start_batch_btn.isEnabled() is False
+assert widget.stop_batch_btn.isEnabled() is True
+
+# 权重预热与开关互不影响：开关全程仅引擎切换触发过一次预热
+assert preload_calls == [1], f"启停开关不得影响预热，got {preload_calls}"
+
+# 收尾：停止 + 未 show 的 widget 不触发 closeEvent——显式确认线程退出，
+# 否则 QThread 携 ctypes 视图存活到解释器退出会段错误
+widget.stop_batch_processing()
+assert _spin_until(lambda: widget._ingest_thread is None), "收尾停止超时"
+assert not th2.isRunning()
 widget.close()
 if _old_engine:
     _qs.setValue("anomaly_engine", _old_engine)
