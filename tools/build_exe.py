@@ -94,6 +94,11 @@ def post_copy() -> None:
     if not env_path.exists():
         env_path.write_text(ENV_TEMPLATE, encoding="utf-8")
         print("[BUILD] wrote .env template")
+    # 开机自启配置工具（登录触发 + 崩溃 1 分钟自动拉起；详见 ps1 头注释）
+    for name in ("install_autostart.ps1", "install_autostart.bat"):
+        src = ROOT / "tools" / name
+        shutil.copy2(src, OUT / name)
+    print("[BUILD] copied install_autostart.ps1/.bat")
 
 
 def report() -> None:
