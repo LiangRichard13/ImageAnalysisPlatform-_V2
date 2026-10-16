@@ -72,6 +72,73 @@ def _resolve_threshold(default: float = 0.21) -> float:
     return value
 
 
+DEFAULT_CROP_EXCLUDE_DETECT = 0
+DEFAULT_CROP_EXCLUDE_JUDGE = 2
+DEFAULT_CROP_EXCLUDE_DISPLAY = 0
+MAX_CROP_EXCLUDE = 12  # 25 等分下每侧最多排除 12 份（保留中间 1 份）
+
+
+def _resolve_edge_crop_count(env_name: str, default: int,
+                             max_exclude: int = MAX_CROP_EXCLUDE) -> int:
+    """读单个边缘排除数（非负整数，≤ 25 等分的一半）；无效告警并回退默认。
+
+    与 utils/anomaly_config.py:_resolve_edge_crop_count 同逻辑（内嵌副本，
+    改动需两处同步）。
+    """
+    raw = os.getenv(env_name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        LOGGER.warning("%s 配置无效: %r，使用默认值 %s", env_name, raw, default)
+        return default
+    if value < 0 or value > max_exclude:
+        LOGGER.warning("%s 超出 [0,%s] 区间: %r，使用默认值 %s",
+                       env_name, max_exclude, raw, default)
+        return default
+    return value
+
+
+def _resolve_crop_exclude_detect() -> int:
+    return _resolve_edge_crop_count("ANOMALY_CROP_EXCLUDE_DETECT", DEFAULT_CROP_EXCLUDE_DETECT)
+
+
+def _resolve_crop_exclude_judge() -> int:
+    return _resolve_edge_crop_count("ANOMALY_CROP_EXCLUDE_JUDGE", DEFAULT_CROP_EXCLUDE_JUDGE)
+
+
+def _resolve_crop_exclude_display() -> int:
+    return _resolve_edge_crop_count("ANOMALY_CROP_EXCLUDE_DISPLAY", DEFAULT_CROP_EXCLUDE_DISPLAY)
+
+
+def _resolve_crop_exclusions(detect: Optional[int], judge: Optional[int],
+                             display: Optional[int]) -> Tuple[int, int, int]:
+    """三排除参数 → 生效值 (detect_n, judge_n, display_n)。
+
+    None → 各自环境变量/默认值；独立计数语义（各自从原图最边缘数起）：
+    判定/展示生效范围取 max(detect, 各自值)。
+    与 utils/anomaly_config.py:resolve_crop_exclusions 同逻辑（内嵌副本）。
+    """
+    detect_n = detect if detect is not None else _resolve_crop_exclude_detect()
+    judge_param = judge if judge is not None else _resolve_crop_exclude_judge()
+    display_param = display if display is not None else _resolve_crop_exclude_display()
+    return detect_n, max(detect_n, judge_param), max(detect_n, display_param)
+
+
+def _filter_wrinkles_by_segments(wrinkles: List[Dict], img_width: int,
+                                 lo_seg: int, hi_seg: int) -> List[Dict]:
+    """丢弃 cx 落在 [lo_seg, hi_seg) 份之外的褶皱（整条丢弃，含 contours）。
+
+    规则引擎为全幅轮廓检测、无逐子图推理，"排除参与检测的子图"以此后过滤
+    等价实现：被排除段内不再产出任何褶皱结果。
+    """
+    if lo_seg <= 0 and hi_seg >= DISPLAY_NUM_CROPS:
+        return list(wrinkles)
+    crop_size = math.ceil(img_width / DISPLAY_NUM_CROPS)
+    return [w for w in wrinkles if lo_seg <= int(w["cx"] // crop_size) < hi_seg]
+
+
 def _odd(value: float, minimum: int = 3) -> int:
     # cv2 的核尺寸/blockSize 必须为正奇数
     v = max(int(round(value)), minimum)
@@ -313,12 +380,20 @@ class AnomalyProcessorService:
         output_dir: str,
         poll_interval: float = 2.0,
         threshold: float = 0.21,
+        exclude_edge_crops: Optional[int] = None,
+        exclude_detect_crops: Optional[int] = None,
+        exclude_display_crops: Optional[int] = None,
     ):
         self.detector = detector
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
         self.poll_interval = poll_interval
         self.threshold = threshold
+        # 三级边缘子图排除（独立计数）：None → 环境变量/默认，见 _resolve_crop_exclusions
+        (self.exclude_detect_crops,
+         self.exclude_edge_crops,
+         self.exclude_display_crops) = _resolve_crop_exclusions(
+            exclude_detect_crops, exclude_edge_crops, exclude_display_crops)
         self.last_processed_batch: Optional[str] = None
 
     def _list_batch_dirs(self) -> List[Path]:
@@ -378,25 +453,31 @@ class AnomalyProcessorService:
         normalized_score = min(max(normalized_score, 0.0), 1.0)
         return normalized_score * 5.0
 
-    def _overall_score(self, wrinkles: List[Dict], img_width: int) -> float:
-        """全图异常分数：只统计中间 21 片（crop 2..22）内的褶皱，与 Dinomaly 版
-        exclude_edge_crops=2 的评分语义对齐；边缘片仍检出并展示，但不驱动全图判定"""
+    def _overall_score(self, wrinkles: List[Dict], img_width: int,
+                       edge_crops: int = _EXCLUDED_EDGE_CROPS) -> float:
+        """全图异常分数：只统计判断范围内（默认中间 21 片，crop 2..22）的褶皱，与
+        Dinomaly 版 exclude_edge_crops=2 的评分语义对齐；检测排除段之外的褶皱已在上游
+        被过滤，此处再按判断排除数收窄；边缘片仍检出并展示，但不驱动全图判定"""
         if not wrinkles:
             return 0.0
         crop_size = math.ceil(img_width / DISPLAY_NUM_CROPS)
-        edge = _EXCLUDED_EDGE_CROPS
+        edge = edge_crops
         center = [
             wrinkle for wrinkle in wrinkles
             if edge <= int(wrinkle["cx"] // crop_size) < DISPLAY_NUM_CROPS - edge
         ]
         return max((wrinkle["confidence"] for wrinkle in center), default=0.0)
 
-    def _compose_anomaly_map(self, map_shape: Tuple[int, int], wrinkles: List[Dict]) -> np.ndarray:
+    def _compose_anomaly_map(self, map_shape: Tuple[int, int], wrinkles: List[Dict],
+                             x_offset: int = 0) -> np.ndarray:
         canvas = np.zeros(map_shape, dtype=np.uint8)
-        # severity 高的后画，重叠时覆盖低严重度区域
+        # severity 高的后画，重叠时覆盖低严重度区域；x_offset 把原图坐标平移到输出图坐标
         for wrinkle in sorted(wrinkles, key=lambda item: item["severity"]):
             gray_val = int(min(255, 100 + (wrinkle["severity"] - 1) * 39))
-            cv2.drawContours(canvas, wrinkle["contours"], -1, gray_val, thickness=cv2.FILLED)
+            contours = wrinkle["contours"]
+            if x_offset:
+                contours = [cnt + np.array([-x_offset, 0], dtype=cnt.dtype) for cnt in contours]
+            cv2.drawContours(canvas, contours, -1, gray_val, thickness=cv2.FILLED)
 
         if not wrinkles:
             return canvas
@@ -405,7 +486,9 @@ class AnomalyProcessorService:
         normalized = min_max_norm(smoothed.astype(np.float32))
         return (normalized * 255).astype(np.uint8)
 
-    def _build_crop_results(self, wrinkles: List[Dict], img_width: int, img_height: int) -> List[Dict]:
+    def _build_crop_results(self, wrinkles: List[Dict], img_width: int, img_height: int,
+                            edge: int = 0, x_offset: int = 0) -> List[Dict]:
+        # crop_size 仍按原图宽计算（段几何不变），仅输出范围与坐标平移受排除影响
         crop_size = math.ceil(img_width / DISPLAY_NUM_CROPS)
         crop_scores = [0.0] * DISPLAY_NUM_CROPS
         for wrinkle in wrinkles:
@@ -414,11 +497,12 @@ class AnomalyProcessorService:
                 crop_scores[crop_index] = max(crop_scores[crop_index], wrinkle["confidence"])
 
         crop_results = []
-        for index, score in enumerate(crop_scores):
-            x_start = index * crop_size
-            x_end = min(x_start + crop_size, img_width)
+        for index in range(edge, DISPLAY_NUM_CROPS - edge):
+            score = crop_scores[index]
+            x_start = index * crop_size - x_offset
+            x_end = min(index * crop_size + crop_size, img_width) - x_offset
             crop_results.append({
-                "crop_id": index,
+                "crop_id": index - edge,
                 "position": [x_start, 0, x_end, img_height],
                 "sample_score": score,
                 "anomaly_level": self._get_anomaly_level(score),
@@ -454,11 +538,28 @@ class AnomalyProcessorService:
         img_height: int,
         wrinkles: List[Dict],
         is_square: bool,
+        judge_n: int = _EXCLUDED_EDGE_CROPS,
+        display_n: int = 0,
+        x_lo: int = 0,
+        x_hi: Optional[int] = None,
     ) -> str:
+        """三件套落盘。非 square 分支按三级排除的保留区口径输出（展示排除物理裁窄）；
+        square 无子图概念，排除数全部忽略（判定维持现状默认剔边）。"""
+        if x_hi is None:
+            x_hi = img_width
         process_dir = self.output_dir / process_id
         process_dir.mkdir(parents=True, exist_ok=True)
 
-        anomaly_map = self._compose_anomaly_map((img_height, img_width), wrinkles)
+        if is_square:
+            anomaly_map = self._compose_anomaly_map((img_height, img_width), wrinkles)
+        else:
+            map_wrinkles = wrinkles
+            if display_n > 0 and DISPLAY_NUM_CROPS - 2 * display_n > 0:
+                map_wrinkles = _filter_wrinkles_by_segments(
+                    wrinkles, img_width, display_n, DISPLAY_NUM_CROPS - display_n)
+            anomaly_map = self._compose_anomaly_map(
+                (img_height, x_hi - x_lo), map_wrinkles, x_offset=x_lo)
+
         anomaly_map_path = process_dir / f"{process_id}.png"
         heatmap_path = process_dir / f"{process_id}_heatmap.png"
         json_path = process_dir / f"{process_id}.json"
@@ -466,7 +567,10 @@ class AnomalyProcessorService:
         cv2.imwrite(str(anomaly_map_path), anomaly_map)
         cv2.imwrite(str(heatmap_path), cvt2heatmap(anomaly_map))
 
-        overall_score = self._overall_score(wrinkles, img_width)
+        if is_square:
+            overall_score = self._overall_score(wrinkles, img_width)
+        else:
+            overall_score = self._overall_score(wrinkles, img_width, edge_crops=judge_n)
         result_data = {
             "process_id": process_id,
             "processing_mode": "rule_based",
@@ -474,7 +578,7 @@ class AnomalyProcessorService:
             "sample_score": overall_score,
             "anomaly_level": self._get_anomaly_level(overall_score),
             "analog_voltage": self._calculate_analog_voltage(overall_score),
-            "original_size": [img_width, img_height],
+            "original_size": [img_width, img_height] if is_square else [x_hi - x_lo, img_height],
             "timestamp": datetime.now().isoformat(),
             "files": {
                 "anomaly_map": anomaly_map_path.name,
@@ -487,8 +591,15 @@ class AnomalyProcessorService:
             result_data["image_size"] = [img_width, img_height]
             result_data["processed_size"] = list(anomaly_map.shape)
         else:
-            result_data["num_crops"] = DISPLAY_NUM_CROPS
-            result_data["crop_results"] = self._build_crop_results(wrinkles, img_width, img_height)
+            crop_results = self._build_crop_results(
+                wrinkles, img_width, img_height, edge=display_n, x_offset=x_lo)
+            result_data["num_crops"] = len(crop_results)
+            result_data["crop_results"] = crop_results
+            result_data["excluded_edge_crops"] = {
+                "detect": self.exclude_detect_crops,
+                "judge": judge_n,
+                "display": display_n,
+            }
 
         with open(json_path, "w", encoding="utf-8") as file:
             json.dump(result_data, file, indent=2, ensure_ascii=False)
@@ -506,7 +617,22 @@ class AnomalyProcessorService:
         duration_ms = (time.perf_counter() - start_time) * 1000
         LOGGER.info("Rule-based detection: %d wrinkles found in %.1f ms", len(wrinkles), duration_ms)
 
-        return self._save_results(process_id, img_width, img_height, wrinkles, is_square)
+        # 三级排除仅作用于有子图概念的非 square 图；square 忽略（判定维持现状默认）
+        judge_n, display_n, x_lo, x_hi = _EXCLUDED_EDGE_CROPS, 0, 0, img_width
+        if not is_square:
+            detect_n, judge_n, display_n = _resolve_crop_exclusions(
+                self.exclude_detect_crops, self.exclude_edge_crops, self.exclude_display_crops)
+            if detect_n > 0 and DISPLAY_NUM_CROPS - 2 * detect_n > 0:
+                # 检测排除：cx 落在排除段的褶皱整条丢弃（等同该子图不产出结果）
+                wrinkles = _filter_wrinkles_by_segments(
+                    wrinkles, img_width, detect_n, DISPLAY_NUM_CROPS - detect_n)
+            if display_n > 0 and DISPLAY_NUM_CROPS - 2 * display_n > 0:
+                crop_size = math.ceil(img_width / DISPLAY_NUM_CROPS)
+                x_lo = display_n * crop_size
+                x_hi = min((DISPLAY_NUM_CROPS - display_n) * crop_size, img_width)
+
+        return self._save_results(process_id, img_width, img_height, wrinkles, is_square,
+                                  judge_n=judge_n, display_n=display_n, x_lo=x_lo, x_hi=x_hi)
 
     def process_batch(self, batch_dir: Path) -> Dict:
         request_data = self._load_request_metadata(batch_dir)
@@ -577,6 +703,24 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="判定阈值（score>阈值 判异常）；缺省读环境变量 ANOMALY_THRESHOLD，均未设置时 0.21",
     )
     parser.add_argument(
+        "--exclude_edge_crops",
+        type=int,
+        default=None,
+        help="每侧排除参与总判定的边缘子图份数；缺省读环境变量 ANOMALY_CROP_EXCLUDE_JUDGE，均未设置时 2",
+    )
+    parser.add_argument(
+        "--exclude_detect_crops",
+        type=int,
+        default=None,
+        help="每侧排除不参与检测的边缘子图份数；缺省读环境变量 ANOMALY_CROP_EXCLUDE_DETECT，均未设置时 0",
+    )
+    parser.add_argument(
+        "--exclude_display_crops",
+        type=int,
+        default=None,
+        help="每侧排除不出现在输出异常图/热力图（输出图裁窄）的边缘子图份数；缺省读环境变量 ANOMALY_CROP_EXCLUDE_DISPLAY，均未设置时 0",
+    )
+    parser.add_argument(
         "--process", type=str, default=None,
         help="单图验证模式：直接处理指定图像并输出三件套后退出，不进入目录轮询",
     )
@@ -612,6 +756,9 @@ def run_single_image(args) -> None:
         input_dir=str(image_path.parent),
         output_dir=args.out_dir,
         threshold=args.threshold,
+        exclude_edge_crops=args.exclude_edge_crops,
+        exclude_detect_crops=args.exclude_detect_crops,
+        exclude_display_crops=args.exclude_display_crops,
     )
     LOGGER.info("Image %dx%d, is_square=%s", img_width, img_height, is_square)
     output_dir = service._process_image(image_path.stem, image_path, is_square)
@@ -636,6 +783,15 @@ def main() -> None:
     parser = build_argument_parser()
     args = parser.parse_args()
     args.threshold = args.threshold if args.threshold is not None else _resolve_threshold()
+    args.exclude_edge_crops = (args.exclude_edge_crops
+                               if args.exclude_edge_crops is not None
+                               else _resolve_crop_exclude_judge())
+    args.exclude_detect_crops = (args.exclude_detect_crops
+                                 if args.exclude_detect_crops is not None
+                                 else _resolve_crop_exclude_detect())
+    args.exclude_display_crops = (args.exclude_display_crops
+                                  if args.exclude_display_crops is not None
+                                  else _resolve_crop_exclude_display())
 
     # 单图验证模式：无需 input/output 共享目录与 request.json
     if args.process:
@@ -649,6 +805,9 @@ def main() -> None:
         output_dir=args.output_dir,
         poll_interval=args.poll_interval,
         threshold=args.threshold,
+        exclude_edge_crops=args.exclude_edge_crops,
+        exclude_detect_crops=args.exclude_detect_crops,
+        exclude_display_crops=args.exclude_display_crops,
     )
     service.run_forever()
 

@@ -15,6 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "dist" / "分析系统"
+ENV_PRESERVED = ROOT / "dist" / ".env.preserved"  # COLLECT 只清 分析系统 子目录，dist 本体不动
 WEIGHTS_SRC = [
     ROOT / "core" / "anomaly" / "dinomaly" / "weights" / "coating_anomaly_final.pth",
 ]
@@ -29,6 +30,13 @@ ANOMALY_ALERT_AUTO_CLOSE_MS=5000
 ANOMALY_ALERT_POPUP_ENABLED=1
 # 异常判定阈值（0-1 浮点，score>阈值 判异常；默认 0.21）
 ANOMALY_THRESHOLD=0.21
+# 异常检测边缘子图排除（膜面长图 25 等分，每侧排除 N 份）
+# 三值独立计数、各自从最边缘数起，生效范围取 max：
+#   判断范围=每侧 max(检测,判断) 份；展示范围=每侧 max(检测,展示) 份（输出图物理裁窄）
+# 示例 1/2/3：每侧第 1 份不检测、前 2 份不判定、前 3 份不展示（合法范围 0-12）
+ANOMALY_CROP_EXCLUDE_DETECT=0
+ANOMALY_CROP_EXCLUDE_JUDGE=2
+ANOMALY_CROP_EXCLUDE_DISPLAY=0
 """
 
 
@@ -38,6 +46,26 @@ def ensure_pyinstaller() -> None:
     except ImportError:
         print("[BUILD] installing pyinstaller ...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller"])
+
+
+def preserve_user_env() -> None:
+    """COLLECT 重建 dist/分析系统 前备份用户自定义 .env（否则每次编译被模板覆盖）。"""
+    src = OUT / ".env"
+    if src.is_file():
+        shutil.copy2(src, ENV_PRESERVED)
+        print("[BUILD] preserved user .env -> dist/.env.preserved")
+
+
+def restore_user_env() -> None:
+    """构建后恢复用户 .env；无备份且 .env 缺失时才写模板。"""
+    env_path = OUT / ".env"
+    if ENV_PRESERVED.is_file():
+        shutil.copy2(ENV_PRESERVED, env_path)
+        ENV_PRESERVED.unlink()
+        print("[BUILD] restored user .env (customizations kept)")
+    elif not env_path.exists():
+        env_path.write_text(ENV_TEMPLATE, encoding="utf-8")
+        print("[BUILD] wrote .env template")
 
 
 def build() -> None:
@@ -92,10 +120,7 @@ def post_copy() -> None:
     for src in sorted(pattern_dir.glob(pattern)):
         shutil.copy2(src, wdir / src.name)
         print(f"  + {src.name} ({src.stat().st_size / 1e6:.1f} MB)")
-    env_path = OUT / ".env"
-    if not env_path.exists():
-        env_path.write_text(ENV_TEMPLATE, encoding="utf-8")
-        print("[BUILD] wrote .env template")
+    # .env 由 __main__ 的 restore_user_env 统一处理（恢复备份或写模板）
     # 开机自启配置工具（登录触发 + 崩溃 1 分钟自动拉起；详见 ps1 头注释）
     for name in ("install_autostart.ps1", "install_autostart.bat"):
         src = ROOT / "tools" / name
@@ -114,6 +139,8 @@ def report() -> None:
 if __name__ == "__main__":
     ensure_pyinstaller()
     if "--no-build" not in sys.argv:
+        preserve_user_env()
         build()
     post_copy()
+    restore_user_env()
     report()

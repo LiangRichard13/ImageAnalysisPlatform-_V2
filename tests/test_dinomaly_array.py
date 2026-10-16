@@ -13,6 +13,14 @@ from utils.dinomaly_engine import DinomalyEngine
 W, H = 2500, 1000  # "very long" 分支（25 等分，片宽 100）
 
 
+@pytest.fixture(autouse=True)
+def _clean_env(monkeypatch):
+    # 排除数/阈值环境变量隔离：本文件断言钉在默认配置（0/2/0、0.21）上
+    for name in ("ANOMALY_CROP_EXCLUDE_DETECT", "ANOMALY_CROP_EXCLUDE_JUDGE",
+                 "ANOMALY_CROP_EXCLUDE_DISPLAY", "ANOMALY_THRESHOLD"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def _make_engine(monkeypatch) -> DinomalyEngine:
     engine = object.__new__(DinomalyEngine)
     engine.threshold = 0.21

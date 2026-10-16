@@ -23,7 +23,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
-from utils.anomaly_config import resolve_anomaly_threshold
+from utils.anomaly_config import resolve_anomaly_threshold, resolve_crop_exclusions
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,19 @@ def _odd(value: float, minimum: int = 3) -> int:
     # cv2 的核尺寸/blockSize 必须为正奇数
     v = max(int(round(value)), minimum)
     return v if v % 2 == 1 else v + 1
+
+
+def _filter_wrinkles_by_segments(wrinkles: List[Dict], img_width: int,
+                                 lo_seg: int, hi_seg: int) -> List[Dict]:
+    """丢弃 cx 落在 [lo_seg, hi_seg) 份之外的褶皱（整条丢弃，含 contours）。
+
+    规则引擎为全幅轮廓检测、无逐子图推理，"排除参与检测的子图"以此后过滤
+    等价实现：被排除段内不再产出任何褶皱结果。
+    """
+    if lo_seg <= 0 and hi_seg >= DISPLAY_NUM_CROPS:
+        return list(wrinkles)
+    crop_size = math.ceil(img_width / DISPLAY_NUM_CROPS)
+    return [w for w in wrinkles if lo_seg <= int(w["cx"] // crop_size) < hi_seg]
 
 
 def min_max_norm(image: np.ndarray) -> np.ndarray:
@@ -276,25 +289,31 @@ class RuleBasedWrinklePipeline:
         normalized_score = min(max(normalized_score, 0.0), 1.0)
         return normalized_score * 5.0
 
-    def _overall_score(self, wrinkles: List[Dict], img_width: int) -> float:
-        """全图异常分数：只统计中间 21 片（crop 2..22）内的褶皱，与 Dinomaly 版
-        exclude_edge_crops=2 的评分语义对齐；边缘片仍检出并展示，但不驱动全图判定"""
+    def _overall_score(self, wrinkles: List[Dict], img_width: int,
+                       edge_crops: int = _EXCLUDED_EDGE_CROPS) -> float:
+        """全图异常分数：只统计判断范围内（默认中间 21 片，crop 2..22）的褶皱，与
+        Dinomaly 版 exclude_edge_crops=2 的评分语义对齐；检测排除段之外的褶皱已在上游
+        被过滤，此处再按判断排除数收窄；边缘片仍检出并展示，但不驱动全图判定"""
         if not wrinkles:
             return 0.0
         crop_size = math.ceil(img_width / DISPLAY_NUM_CROPS)
-        edge = _EXCLUDED_EDGE_CROPS
+        edge = edge_crops
         center = [
             wrinkle for wrinkle in wrinkles
             if edge <= int(wrinkle["cx"] // crop_size) < DISPLAY_NUM_CROPS - edge
         ]
         return max((wrinkle["confidence"] for wrinkle in center), default=0.0)
 
-    def _compose_anomaly_map(self, map_shape: Tuple[int, int], wrinkles: List[Dict]) -> np.ndarray:
+    def _compose_anomaly_map(self, map_shape: Tuple[int, int], wrinkles: List[Dict],
+                             x_offset: int = 0) -> np.ndarray:
         canvas = np.zeros(map_shape, dtype=np.uint8)
-        # severity 高的后画，重叠时覆盖低严重度区域
+        # severity 高的后画，重叠时覆盖低严重度区域；x_offset 把原图坐标平移到输出图坐标
         for wrinkle in sorted(wrinkles, key=lambda item: item["severity"]):
             gray_val = int(min(255, 100 + (wrinkle["severity"] - 1) * 39))
-            cv2.drawContours(canvas, wrinkle["contours"], -1, gray_val, thickness=cv2.FILLED)
+            contours = wrinkle["contours"]
+            if x_offset:
+                contours = [cnt + np.array([-x_offset, 0], dtype=cnt.dtype) for cnt in contours]
+            cv2.drawContours(canvas, contours, -1, gray_val, thickness=cv2.FILLED)
 
         if not wrinkles:
             return canvas
@@ -303,7 +322,9 @@ class RuleBasedWrinklePipeline:
         normalized = min_max_norm(smoothed.astype(np.float32))
         return (normalized * 255).astype(np.uint8)
 
-    def _build_crop_results(self, wrinkles: List[Dict], img_width: int, img_height: int) -> List[Dict]:
+    def _build_crop_results(self, wrinkles: List[Dict], img_width: int, img_height: int,
+                            edge: int = 0, x_offset: int = 0) -> List[Dict]:
+        # crop_size 仍按原图宽计算（段几何不变），仅输出范围与坐标平移受排除影响
         crop_size = math.ceil(img_width / DISPLAY_NUM_CROPS)
         crop_scores = [0.0] * DISPLAY_NUM_CROPS
         for wrinkle in wrinkles:
@@ -312,11 +333,12 @@ class RuleBasedWrinklePipeline:
                 crop_scores[crop_index] = max(crop_scores[crop_index], wrinkle["confidence"])
 
         crop_results = []
-        for index, score in enumerate(crop_scores):
-            x_start = index * crop_size
-            x_end = min(x_start + crop_size, img_width)
+        for index in range(edge, DISPLAY_NUM_CROPS - edge):
+            score = crop_scores[index]
+            x_start = index * crop_size - x_offset
+            x_end = min(index * crop_size + crop_size, img_width) - x_offset
             crop_results.append({
-                "crop_id": index,
+                "crop_id": index - edge,
                 "position": [x_start, 0, x_end, img_height],
                 "sample_score": score,
                 "anomaly_level": self._get_anomaly_level(score),
@@ -345,42 +367,88 @@ class RuleBasedWrinklePipeline:
             },
         }
 
-    def process_array(self, gray: np.ndarray) -> Tuple[np.ndarray, np.ndarray, Dict]:
+    def process_array(
+        self,
+        gray: np.ndarray,
+        exclude_edge_crops: Optional[int] = None,
+        exclude_detect_crops: Optional[int] = None,
+        exclude_display_crops: Optional[int] = None,
+    ) -> Tuple[np.ndarray, np.ndarray, Dict]:
         """内存直通入口：GRAY8(H×W) → (pred_u8, heat_u8, metrics)。
 
         pred 与 heat 同源（未上色强度图，归档时才 cvt2heatmap 上色）；
         metrics 不含 process_id/files（由文件路径模式/归档 worker 补齐）。
+        三排除参数 None → 环境变量/默认（独立计数，见 utils/anomaly_config.py）：
+        检测排除按 cx 段后过滤（无逐子图推理）；判定走 _overall_score(edge_crops)；
+        展示排除把输出图物理裁窄到保留区，metrics 同步保留区口径。
         """
         img_height, img_width = gray.shape[:2]
+        detect_n, judge_n, display_n = resolve_crop_exclusions(
+            exclude_detect_crops, exclude_edge_crops, exclude_display_crops)
 
         start_time = time.perf_counter()
         wrinkles = self.detector.detect(gray)
         duration_ms = (time.perf_counter() - start_time) * 1000
         logger.info("Rule-based detection: %d wrinkles found in %.1f ms", len(wrinkles), duration_ms)
 
-        anomaly_map = self._compose_anomaly_map((img_height, img_width), wrinkles)
-        overall_score = self._overall_score(wrinkles, img_width)
+        # 1) 检测排除：cx 落在排除段的褶皱整条丢弃（等同该子图不产出结果）
+        if detect_n > 0 and DISPLAY_NUM_CROPS - 2 * detect_n > 0:
+            wrinkles = _filter_wrinkles_by_segments(
+                wrinkles, img_width, detect_n, DISPLAY_NUM_CROPS - detect_n)
+
+        # 2) 总判定：cx 段是原图绝对索引，直接按判断排除数收窄
+        overall_score = self._overall_score(wrinkles, img_width, edge_crops=judge_n)
+
+        # 3) 展示排除：再过滤 + 画布物理裁窄（wrinkles JSON 清单保持检测范围口径）
+        crop_size = math.ceil(img_width / DISPLAY_NUM_CROPS)
+        x_lo = display_n * crop_size
+        x_hi = min((DISPLAY_NUM_CROPS - display_n) * crop_size, img_width)
+        if display_n > 0 and DISPLAY_NUM_CROPS - 2 * display_n > 0:
+            map_wrinkles = _filter_wrinkles_by_segments(
+                wrinkles, img_width, display_n, DISPLAY_NUM_CROPS - display_n)
+        else:
+            x_lo, x_hi = 0, img_width
+            map_wrinkles = wrinkles
+
+        anomaly_map = self._compose_anomaly_map((img_height, x_hi - x_lo), map_wrinkles, x_offset=x_lo)
+
+        crop_results = self._build_crop_results(
+            wrinkles, img_width, img_height, edge=display_n, x_offset=x_lo)
         metrics = {
             "processing_mode": "rule_based",
             "model_weight": "rule_based",
             "sample_score": overall_score,
             "anomaly_level": self._get_anomaly_level(overall_score),
             "analog_voltage": self._calculate_analog_voltage(overall_score),
-            "original_size": [img_width, img_height],
-            "num_crops": DISPLAY_NUM_CROPS,
+            "original_size": [x_hi - x_lo, img_height],
+            "num_crops": len(crop_results),
             "timestamp": datetime.now().isoformat(),
-            "crop_results": self._build_crop_results(wrinkles, img_width, img_height),
+            "crop_results": crop_results,
+            "excluded_edge_crops": {"detect": detect_n, "judge": judge_n, "display": display_n},
             "wrinkles": [self._wrinkle_to_json(wrinkle) for wrinkle in wrinkles],
         }
         return anomaly_map, anomaly_map, metrics
 
-    def process_to_dir(self, image_path: str, output_dir: str, process_id: str) -> Tuple[str, str, str]:
+    def process_to_dir(
+        self,
+        image_path: str,
+        output_dir: str,
+        process_id: str,
+        exclude_edge_crops: Optional[int] = None,
+        exclude_detect_crops: Optional[int] = None,
+        exclude_display_crops: Optional[int] = None,
+    ) -> Tuple[str, str, str]:
         """处理单张图片，三件套写入 output_dir/process_id/，返回 (预测图, 热力图, JSON) 路径"""
         gray = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
         if gray is None:
             raise ValueError(f"Failed to read image: {image_path}")
 
-        pred, heat, metrics = self.process_array(gray)
+        pred, heat, metrics = self.process_array(
+            gray,
+            exclude_edge_crops=exclude_edge_crops,
+            exclude_detect_crops=exclude_detect_crops,
+            exclude_display_crops=exclude_display_crops,
+        )
 
         process_dir = Path(output_dir) / process_id
         process_dir.mkdir(parents=True, exist_ok=True)

@@ -57,6 +57,60 @@ def _resolve_threshold(default: float = 0.21) -> float:
     return value
 
 
+DEFAULT_CROP_EXCLUDE_DETECT = 0
+DEFAULT_CROP_EXCLUDE_JUDGE = 2
+DEFAULT_CROP_EXCLUDE_DISPLAY = 0
+MAX_CROP_EXCLUDE = 12  # 25 等分下每侧最多排除 12 份（保留中间 1 份）
+
+
+def _resolve_edge_crop_count(env_name: str, default: int,
+                             max_exclude: int = MAX_CROP_EXCLUDE) -> int:
+    """读单个边缘排除数（非负整数，≤ 25 等分的一半）；无效告警并回退默认。
+
+    与 utils/anomaly_config.py:_resolve_edge_crop_count 同逻辑（内嵌副本，
+    改动需两处同步）。
+    """
+    raw = os.getenv(env_name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        LOGGER.warning("%s 配置无效: %r，使用默认值 %s", env_name, raw, default)
+        return default
+    if value < 0 or value > max_exclude:
+        LOGGER.warning("%s 超出 [0,%s] 区间: %r，使用默认值 %s",
+                       env_name, max_exclude, raw, default)
+        return default
+    return value
+
+
+def _resolve_crop_exclude_detect() -> int:
+    return _resolve_edge_crop_count("ANOMALY_CROP_EXCLUDE_DETECT", DEFAULT_CROP_EXCLUDE_DETECT)
+
+
+def _resolve_crop_exclude_judge() -> int:
+    return _resolve_edge_crop_count("ANOMALY_CROP_EXCLUDE_JUDGE", DEFAULT_CROP_EXCLUDE_JUDGE)
+
+
+def _resolve_crop_exclude_display() -> int:
+    return _resolve_edge_crop_count("ANOMALY_CROP_EXCLUDE_DISPLAY", DEFAULT_CROP_EXCLUDE_DISPLAY)
+
+
+def _resolve_crop_exclusions(detect: Optional[int], judge: Optional[int],
+                             display: Optional[int]) -> Tuple[int, int, int]:
+    """三排除参数 → 生效值 (detect_n, judge_n, display_n)。
+
+    None → 各自环境变量/默认值；独立计数语义（各自从原图最边缘数起）：
+    判定/展示生效范围取 max(detect, 各自值)。
+    与 utils/anomaly_config.py:resolve_crop_exclusions 同逻辑（内嵌副本）。
+    """
+    detect_n = detect if detect is not None else _resolve_crop_exclude_detect()
+    judge_param = judge if judge is not None else _resolve_crop_exclude_judge()
+    display_param = display if display is not None else _resolve_crop_exclude_display()
+    return detect_n, max(detect_n, judge_param), max(detect_n, display_param)
+
+
 def setup_logging() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -143,14 +197,20 @@ class AnomalyProcessorService:
         output_dir: str,
         poll_interval: float = 2.0,
         threshold: float = 0.21,
-        exclude_edge_crops: int = 2,
+        exclude_edge_crops: Optional[int] = None,
+        exclude_detect_crops: Optional[int] = None,
+        exclude_display_crops: Optional[int] = None,
     ):
         self.model_manager = model_manager
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
         self.poll_interval = poll_interval
         self.threshold = threshold
-        self.exclude_edge_crops = max(0, exclude_edge_crops)
+        # 三级边缘子图排除（独立计数）：None → 环境变量/默认，见 _resolve_crop_exclusions
+        (self.exclude_detect_crops,
+         self.exclude_edge_crops,
+         self.exclude_display_crops) = _resolve_crop_exclusions(
+            exclude_detect_crops, exclude_edge_crops, exclude_display_crops)
         self.last_processed_batch: Optional[str] = None
 
     def _list_batch_dirs(self) -> List[Path]:
@@ -327,45 +387,77 @@ class AnomalyProcessorService:
         self,
         crops_results: Sequence[Tuple[Dict, Tuple[int, int, int, int]]],
         original_size: Tuple[int, int],
-        exclude_edge_crops: int,
+        detect_n: int = 0,
+        judge_n: int = 0,
+        display_n: int = 0,
     ) -> Dict:
+        """合并子图：判定范围/展示窗口按三级排除换算（独立计数，见 _resolve_crop_exclusions）。
+
+        crops_results 已是检测范围内的子图（detect 排除在切片时完成）；判定相对
+        排除数 = judge_n - detect_n；展示窗口 = 检出列表两端再各收 display_n-detect_n
+        份，像素边界取窗口边缘子图 position（兼容 fixed 尾片收窄与 adaptive 轴向）。
+        """
         width, height = original_size
         merged_anomaly_map = np.zeros((height, width), dtype=np.float32)
-        crop_results_data = []
         all_scores = []
 
-        for index, (result, position) in enumerate(crops_results):
+        for result, position in crops_results:
             x1, y1, x2, y2 = position
-            crop_width = x2 - x1
-            crop_height = y2 - y1
-            anomaly_map_resized = cv2.resize(result["anomaly_map"], (crop_width, crop_height))
+            anomaly_map_resized = cv2.resize(result["anomaly_map"], (x2 - x1, y2 - y1))
             merged_anomaly_map[y1:y2, x1:x2] = anomaly_map_resized
-
-            crop_results_data.append(
-                {
-                    "crop_id": index,
-                    "position": position,
-                    "sample_score": result["sample_score"],
-                    "anomaly_level": self._get_anomaly_level(result["sample_score"]),
-                }
-            )
             all_scores.append(result["sample_score"])
 
         if not all_scores:
             raise ValueError("No crop result available for merge")
 
         scores_for_overall = list(all_scores)
-        if exclude_edge_crops > 0 and len(all_scores) > 2 * exclude_edge_crops:
-            scores_for_overall = all_scores[exclude_edge_crops:-exclude_edge_crops]
-
+        rel_judge = judge_n - detect_n
+        if rel_judge > 0 and len(all_scores) > 2 * rel_judge:
+            scores_for_overall = all_scores[rel_judge:-rel_judge]
         overall_score = max(scores_for_overall)
+
+        # 展示窗口：像素边界取窗口边缘子图 position
+        k = display_n - detect_n
+        kept = list(crops_results)
+        if k > 0 and len(crops_results) > 2 * k:
+            kept = kept[k:-k]
+        fx1, fy1, fx2, _ = kept[0][1]
+        _, ly1, lx2, ly2 = kept[-1][1]
+        vertical = fx1 == 0 and fx2 == width  # adaptive 竖图：沿 y 裁
+        if vertical:
+            lo, hi = fy1, ly2
+        else:
+            lo, hi = fx1, lx2
+
+        crop_results_data = []
+        for index, (result, position) in enumerate(kept):
+            x1, y1, x2, y2 = position
+            if vertical:
+                out_position = (x1, y1 - lo, x2, y2 - lo)
+            else:
+                out_position = (x1 - lo, y1, x2 - lo, y2)
+            crop_results_data.append(
+                {
+                    "crop_id": index,
+                    "position": out_position,
+                    "sample_score": result["sample_score"],
+                    "anomaly_level": self._get_anomaly_level(result["sample_score"]),
+                }
+            )
+
+        if lo > 0 or hi < (height if vertical else width):
+            merged_anomaly_map = (merged_anomaly_map[lo:hi, :] if vertical
+                                  else merged_anomaly_map[:, lo:hi])
+
+        out_size = (width, hi - lo) if vertical else (hi - lo, height)
         return {
             "merged_anomaly_map": merged_anomaly_map,
             "overall_score": overall_score,
             "overall_anomaly_level": self._get_overall_anomaly_level(scores_for_overall),
             "crop_results": crop_results_data,
-            "original_size": original_size,
-            "num_crops": len(crops_results),
+            "original_size": out_size,
+            "num_crops": len(kept),
+            "excluded_edge_crops": {"detect": detect_n, "judge": judge_n, "display": display_n},
         }
 
     def _save_merged_results(self, process_id: str, results: Dict, processing_mode: str) -> str:
@@ -395,6 +487,7 @@ class AnomalyProcessorService:
             "num_crops": results["num_crops"],
             "timestamp": datetime.now().isoformat(),
             "crop_results": results["crop_results"],
+            "excluded_edge_crops": results["excluded_edge_crops"],
             "files": {
                 "anomaly_map": anomaly_map_path.name,
                 "heatmap": heatmap_path.name,
@@ -414,12 +507,14 @@ class AnomalyProcessorService:
     def _process_cropped(self, process_id: str, image_path: Path, processing_mode: str) -> str:
         image = Image.open(image_path).convert("RGB")
         original_size = image.size
-        if processing_mode == "fixed_crop":
-            crops = self._crop_fixed(image)
-            exclude_edge_crops = self.exclude_edge_crops
-        else:
-            crops = self._crop_adaptive(image)
-            exclude_edge_crops = 0
+        # 行为变更：adaptive 此前强制排除 0，现统一尊重配置值（与 fixed_crop 一致）
+        crops = self._crop_fixed(image) if processing_mode == "fixed_crop" else self._crop_adaptive(image)
+
+        detect_n, judge_n, display_n = (self.exclude_detect_crops,
+                                        self.exclude_edge_crops,
+                                        self.exclude_display_crops)
+        if detect_n > 0 and len(crops) > 2 * detect_n:
+            crops = crops[detect_n:-detect_n]  # 检测排除：边缘子图不推理（省算力）
 
         crops_results = []
         for crop_image, position in crops:
@@ -429,7 +524,9 @@ class AnomalyProcessorService:
         merged_results = self._merge_crop_results(
             crops_results,
             original_size,
-            exclude_edge_crops=exclude_edge_crops,
+            detect_n=detect_n,
+            judge_n=judge_n,
+            display_n=display_n,
         )
         return self._save_merged_results(process_id, merged_results, processing_mode)
 
@@ -510,8 +607,20 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--exclude_edge_crops",
         type=int,
-        default=2,
-        help="每侧排除参与总评判定的边缘子图份数（仅 fixed_crop 模式生效）",
+        default=None,
+        help="每侧排除参与总判定的边缘子图份数；缺省读环境变量 ANOMALY_CROP_EXCLUDE_JUDGE，均未设置时 2",
+    )
+    parser.add_argument(
+        "--exclude_detect_crops",
+        type=int,
+        default=None,
+        help="每侧排除不参与推理/检测的边缘子图份数；缺省读环境变量 ANOMALY_CROP_EXCLUDE_DETECT，均未设置时 0",
+    )
+    parser.add_argument(
+        "--exclude_display_crops",
+        type=int,
+        default=None,
+        help="每侧排除不出现在输出异常图/热力图（输出图裁窄）的边缘子图份数；缺省读环境变量 ANOMALY_CROP_EXCLUDE_DISPLAY，均未设置时 0",
     )
     return parser
 
@@ -524,6 +633,15 @@ def main() -> None:
     model_path = args.model_path or os.getenv("ANOMALY_MODEL_PATH") or DEFAULT_ANOMALY_MODEL_PATH
 
     args.threshold = args.threshold if args.threshold is not None else _resolve_threshold()
+    args.exclude_edge_crops = (args.exclude_edge_crops
+                               if args.exclude_edge_crops is not None
+                               else _resolve_crop_exclude_judge())
+    args.exclude_detect_crops = (args.exclude_detect_crops
+                                 if args.exclude_detect_crops is not None
+                                 else _resolve_crop_exclude_detect())
+    args.exclude_display_crops = (args.exclude_display_crops
+                                  if args.exclude_display_crops is not None
+                                  else _resolve_crop_exclude_display())
 
     model_manager = SharedModelManager(model_path=model_path, device=args.device)
     service = AnomalyProcessorService(
@@ -533,6 +651,8 @@ def main() -> None:
         poll_interval=args.poll_interval,
         threshold=args.threshold,
         exclude_edge_crops=args.exclude_edge_crops,
+        exclude_detect_crops=args.exclude_detect_crops,
+        exclude_display_crops=args.exclude_display_crops,
     )
     service.run_forever()
 
