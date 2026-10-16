@@ -10,6 +10,8 @@
 - 权重不进包：构建脚本后置复制到 dist/分析系统/weights/（外置可替换），
   入口 main_window._setup_frozen_environment 设 ANOMALY_MODEL_PATH/
   TREND_MODEL_PATH 指向它
+- 例外：DINOv2 骨干权重随包（见 ALLOW_FILES）——vit_encoder.py 按包内
+  固定路径查找，架构固定不可替换，缺失会联网下载，离线产线机首启失败
 - hiddenimports 为动态导入链的第三方库（静态分析盲区），缺失在 --smoke
   时以 ImportError 暴露，逐个补
 """
@@ -23,11 +25,18 @@ timm_datas, timm_binaries, timm_hiddenimports = collect_all('timm')
 
 # ---- core/ 数据文件：递归收集，排除权重（外置）、_archived、__pycache__ ----
 EXCLUDE_DIRS = {"weights", "_archived", "__pycache__"}
+# 白名单例外：算法包自带的骨干权重随包分发（架构固定、非外置可替换）
+ALLOW_FILES = {
+    "core/algo_packages/models/backbones/weights/dinov2_vitb14_reg4_pretrain.pth",
+}
 core_datas = []
 for src in sorted((PROJECT / "core").rglob("*")):
     if not src.is_file():
         continue
     rel = src.relative_to(PROJECT)
+    if rel.as_posix() in ALLOW_FILES:
+        core_datas.append((str(src), str(rel.parent)))
+        continue
     if any(part in EXCLUDE_DIRS for part in rel.parts):
         continue
     core_datas.append((str(src), str(rel.parent)))
