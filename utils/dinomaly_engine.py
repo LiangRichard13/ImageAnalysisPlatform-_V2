@@ -372,7 +372,9 @@ class DinomalyEngine:
         三排除参数 None → 环境变量/默认（独立计数，见 _resolve_crop_exclusions）；
         square 无子图概念，排除数忽略。
         """
-        rgb = np.repeat(gray[..., None], 3, axis=2)
+        # cvtColor（SIMD）替代 np.repeat 逐元素复制：同环境 A/B 长条帧 engine −290ms，
+        # 输出逐字节相同（R=G=B=gray）；ascontiguousarray 为未来非连续输入的零成本防御
+        rgb = cv2.cvtColor(np.ascontiguousarray(gray), cv2.COLOR_GRAY2RGB)
         image = Image.fromarray(rgb, "RGB")
 
         if image_type == "square":

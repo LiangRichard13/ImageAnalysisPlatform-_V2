@@ -85,6 +85,10 @@ def test_process_array_gray8_expands_to_rgb(monkeypatch):
         arr = np.array(image)
         seen["shape"] = arr.shape
         seen["mode"] = image.mode
+        # 灰度复制语义锚点：三通道逐像素相等（随机图防常数蒙混）
+        seen.setdefault("chan_eq", []).append(
+            bool(np.array_equal(arr[..., 0], arr[..., 1])
+                 and np.array_equal(arr[..., 1], arr[..., 2])))
         return {
             "anomaly_map": np.zeros((392, 392), dtype=np.float32),
             "sample_score": 0.0,
@@ -93,11 +97,13 @@ def test_process_array_gray8_expands_to_rgb(monkeypatch):
         }
 
     monkeypatch.setattr(engine, "process_pil_image", spy)
-    gray = np.full((H, W), 128, dtype=np.uint8)
+    rng = np.random.default_rng(11)
+    gray = rng.integers(0, 256, size=(H, W), dtype=np.uint8)
     engine.process_array(gray, image_type="very long")
     # 每片均为 (H, 片宽, 3) 的 RGB
     assert seen["shape"][0] == H and seen["shape"][2] == 3
     assert seen["mode"] == "RGB"
+    assert len(seen["chan_eq"]) == 25 and all(seen["chan_eq"])
 
 
 def test_process_array_square_branch(monkeypatch):
