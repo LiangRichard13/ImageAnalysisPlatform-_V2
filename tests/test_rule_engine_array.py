@@ -3,10 +3,24 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 from utils.rule_based_wrinkle import RuleBasedWrinklePipeline, cvt2heatmap
 
 IMG_DIR = Path(__file__).resolve().parent.parent / "test_images"
+
+
+@pytest.fixture(autouse=True)
+def _clean_env(monkeypatch):
+    # 部署 .env（ANOMALY_CROP_EXCLUDE_* 等）会改变输出尺寸/判定，断言钉在默认
+    # 配置上。setenv 而非 delenv：delenv 会让 AnomalyDetectionClient 的 load_dotenv
+    # 从部署 .env 重新注入；显式设为代码默认值（0/2/0、0.21），load_dotenv 不覆盖已存在变量
+    defaults = {"ANOMALY_CROP_EXCLUDE_DETECT": "0",
+                "ANOMALY_CROP_EXCLUDE_JUDGE": "2",
+                "ANOMALY_CROP_EXCLUDE_DISPLAY": "0",
+                "ANOMALY_THRESHOLD": "0.21"}
+    for name, value in defaults.items():
+        monkeypatch.setenv(name, value)
 
 
 def _ensure_image():

@@ -17,6 +17,19 @@ ROOT = Path(__file__).resolve().parent.parent
 BENCH = ROOT / "tools" / "shm_bench.py"
 
 
+@pytest.fixture(autouse=True)
+def _clean_env(monkeypatch):
+    # 部署 .env（ANOMALY_CROP_EXCLUDE_* 等）会改变 emit 尺寸断言，钉默认配置
+    # setenv 而非 delenv：delenv 会让 AnomalyDetectionClient 的 load_dotenv
+    # 从部署 .env 重新注入；显式设为代码默认值（0/2/0、0.21），load_dotenv 不覆盖已存在变量
+    defaults = {"ANOMALY_CROP_EXCLUDE_DETECT": "0",
+                "ANOMALY_CROP_EXCLUDE_JUDGE": "2",
+                "ANOMALY_CROP_EXCLUDE_DISPLAY": "0",
+                "ANOMALY_THRESHOLD": "0.21"}
+    for name, value in defaults.items():
+        monkeypatch.setenv(name, value)
+
+
 def test_downscale_unit():
     """_downscale：超限帧等比降到长边=上限；小图原对象返回（零拷贝）。"""
     import numpy as np
