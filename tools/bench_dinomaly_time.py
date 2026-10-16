@@ -81,7 +81,9 @@ def run_shm_mode(args, picked: list) -> dict:
     from utils.anomaly_detection_client import ENGINE_DINOMALY, AnomalyDetectionClient
     from utils.archive_worker import ArchiveItem, ArchiveWorker
     from utils.dinomaly_engine import DEFAULT_WEIGHT_PATH
-    from utils.shm_ingest import _to_qimage_gray, _to_qimage_jet
+    from utils.shm_ingest import (
+        _PREVIEW_MAX_EDGE, _RESULT_MAX_EDGE, _downscale,
+        _to_qimage_gray, _to_qimage_jet)
 
     client = AnomalyDetectionClient()
     tmp_archive = Path(args.image_dir).parent / "_bench_dinomaly_archive_out"
@@ -100,9 +102,10 @@ def run_shm_mode(args, picked: list) -> dict:
         t["engine"] = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        _to_qimage_gray(gray)
-        _to_qimage_gray(pred)
-        _to_qimage_jet(heat)
+        # 与 shm_ingest._process_frame 的 emit 镜像：先降采样到显示端上限再转 QImage
+        _to_qimage_gray(_downscale(gray, _PREVIEW_MAX_EDGE))
+        _to_qimage_gray(_downscale(pred, _RESULT_MAX_EDGE))
+        _to_qimage_jet(_downscale(heat, _RESULT_MAX_EDGE))
         t["ui"] = time.perf_counter() - t0
 
         t["realtime"] = t["engine"] + t["ui"]  # 帧周期（未含 ring 写入 memcpy，memcpy 级）

@@ -17,6 +17,34 @@ ROOT = Path(__file__).resolve().parent.parent
 BENCH = ROOT / "tools" / "shm_bench.py"
 
 
+def test_downscale_unit():
+    """_downscale：超限帧等比降到长边=上限；小图原对象返回（零拷贝）。"""
+    import numpy as np
+
+    from utils.shm_ingest import _downscale
+
+    big = np.zeros((1000, 31901), dtype=np.uint8)
+    got = _downscale(big, 3200)
+    assert got.shape == (100, 3200)  # 长边精确 3200，等比
+    assert got.max() == 0  # 全零内容保持（INTER_AREA 对常数区无伪影）
+
+    small = np.zeros((200, 320), dtype=np.uint8)
+    assert _downscale(small, 3200) is small  # 未超限零拷贝
+
+
+def test_downscale_limits_match_display_tab():
+    """降采样上限与显示端截断常量同步（防两端漂移；不反向 import tab——会循环导入）。"""
+    import utils.shm_ingest as shm_ingest
+
+    assert shm_ingest._PREVIEW_MAX_EDGE == 1600
+    assert shm_ingest._RESULT_MAX_EDGE == 3200
+
+    # 与显示端实际常量对账（tab 导入 shm_ingest，此处后导入无循环）
+    import anomaly_detection_tab as tab_mod
+    assert shm_ingest._PREVIEW_MAX_EDGE == tab_mod.PREVIEW_SOURCE_MAX_W
+    assert shm_ingest._RESULT_MAX_EDGE == tab_mod.RESULT_SOURCE_MAX_EDGE
+
+
 def test_ingest_full_pipeline(tmp_path):
     """bench 生产者 → ingest 线程（rule 引擎）→ RESULT ring + 异步归档三件套。"""
     from PyQt5.QtCore import Qt
@@ -219,6 +247,70 @@ else:
 print("WIDGET_SMOKE_OK")
 sys.exit(0)
 """
+
+
+def test_ingest_large_frame_downscaled_emit_fullres_ring(tmp_path):
+    """大帧：emit 的 QImage 降到显示上限（预览 1600/结果 3200），
+    RESULT ring 与归档保持全分辨率——降采样只作用于显示通路。"""
+    from PyQt5.QtCore import Qt
+    from PyQt5.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+
+    from utils.anomaly_detection_client import ENGINE_RULE_BASED
+    from utils.shm_ingest import SharedMemoryIngestThread
+
+    ns = rf"Local\IAP_TEST_BIG{os.getpid()}_{uuid.uuid4().hex[:6]}"
+    frames = 8
+    proc = subprocess.Popen(
+        [sys.executable, str(BENCH), "--producer", "--frames", str(frames),
+         "--fps", "2", "--size", "4000", "1000", "--slots", "4",
+         "--namespace", ns],
+        cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    results = []
+    got_result = threading.Event()
+    thread = SharedMemoryIngestThread(
+        engine_name=ENGINE_RULE_BASED, namespace=ns,
+        api_root=tmp_path / "anomaly_api")
+    thread.result_ready.connect(
+        lambda seq, payload, gray_img, pred_img, heat_img: (
+            results.append((seq, gray_img, pred_img, heat_img)),
+            got_result.set()),
+        Qt.DirectConnection)
+    thread.start()
+
+    try:
+        assert got_result.wait(timeout=30), "超时未产生任何推理结果"
+        out, err = proc.communicate(timeout=30)
+        assert proc.returncode == 0, f"{out}\n{err}"
+        seq, gray_img, pred_img, heat_img = results[-1]
+        # emit 通路：预览/结果图降到显示端上限
+        assert gray_img.width() == 1600 and gray_img.height() == 400
+        assert pred_img.width() == 3200 and pred_img.height() == 800
+        assert heat_img.width() == 3200 and heat_img.height() == 800
+
+        # RESULT ring 全分辨率（孪生端不受降采样影响）
+        from utils.ipc import shm_ring
+        from utils.ipc.layout import CtrlBlock, obj_name
+        ctrl = CtrlBlock.attach(ns)
+        evt = shm_ring.NamedEvent(obj_name(ns, "EVT_RESULT"))
+        rconsumer = shm_ring.ResultRingConsumer.attach(ctrl, ns, evt)
+        try:
+            got = rconsumer.fetch_latest(last_seq=0, wait_ms=2000)
+            assert got is not None
+            rseq, frame_seq, js, pred, heat = got
+            assert pred.shape == (1000, 4000)
+        finally:
+            rconsumer.close()
+            evt.close()
+            ctrl.close()
+        app.processEvents()
+    finally:
+        thread.stop()
+        thread.wait(15000)
+        if proc.poll() is None:
+            proc.kill()
 
 
 def test_widget_shm_mode_disables_batch():

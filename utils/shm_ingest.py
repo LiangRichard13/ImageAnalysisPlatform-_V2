@@ -27,6 +27,23 @@ from utils.ipc.win32 import GetTickCount64
 
 logger = logging.getLogger(__name__)
 
+# 显示通路上抛前的降采样上限，与显示端截断常量保持一致
+# （anomaly_detection_tab.PREVIEW_SOURCE_MAX_W / RESULT_SOURCE_MAX_EDGE——显示端
+# 本来就把超限源图截到该长边，故降到此上限零显示质量损失）；RESULT ring 与
+# 归档通路不经过这两个值，保持全分辨率。test_downscale_limits_match_display_tab 钉同步。
+_PREVIEW_MAX_EDGE = 1600
+_RESULT_MAX_EDGE = 3200
+
+
+def _downscale(arr: np.ndarray, max_edge: int) -> np.ndarray:
+    """长边超限才等比降到 max_edge（INTER_AREA），未超限原对象返回（零拷贝）。"""
+    h, w = arr.shape[:2]
+    if max(h, w) <= max_edge:
+        return arr
+    scale = max_edge / max(h, w)
+    return cv2.resize(arr, (max(1, round(w * scale)), max(1, round(h * scale))),
+                      interpolation=cv2.INTER_AREA)
+
 
 def _to_qimage_gray(arr: np.ndarray) -> QImage:
     """GRAY8 ndarray → 独立 QImage（copy 脱离 numpy 生命周期，跨线程传值安全）。"""
@@ -197,8 +214,11 @@ class SharedMemoryIngestThread(QThread):
             json_dict=metrics))
 
         self._last_seq = seq
+        # 显示 QImage 上抛前降到显示端本来就会截断的尺寸（零质量损失）；
+        # 上面的 write_result/ArchiveItem 已拿全分辨率原值，不受影响
         self.result_ready.emit(seq, metrics,
-                               _to_qimage_gray(gray), _to_qimage_gray(pred),
-                               _to_qimage_jet(heat))
+                               _to_qimage_gray(_downscale(gray, _PREVIEW_MAX_EDGE)),
+                               _to_qimage_gray(_downscale(pred, _RESULT_MAX_EDGE)),
+                               _to_qimage_jet(_downscale(heat, _RESULT_MAX_EDGE)))
         logger.info("实时处理完成 frame_seq=%s → result_seq=%s，耗时 %.0f ms",
                     seq, result_seq, (time.perf_counter() - t0) * 1000)
