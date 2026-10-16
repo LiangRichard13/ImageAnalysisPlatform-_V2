@@ -68,7 +68,11 @@ class Prompt(nn.Module):
             
             if prompt_mask is None:
                 _, idx = torch.topk(similarity, k=self.top_k, dim=1) # B, top_k
-                if self.batchwise_prompt:
+                # 本地补丁：eval 下跳过 batchwise 多数投票，逐样本选择各自的 topk
+                # prompt（top_k=1 时与 B=1 现网行为严格等价）——否则合批推理（B>1）
+                # 会把整 batch 多数 prompt 强加给所有样本，与逐片推理不一致。
+                # 训练语义（batchwise 多数投票）原样保留。同步上游代码时勿丢失此补丁。
+                if self.batchwise_prompt and self.training:
                     prompt_id, id_counts = torch.unique(idx, return_counts=True, sorted=True)
                     # In jnp.unique, when the 'size' is specified and there are fewer than the indicated number of elements,
                     # the remaining elements will be filled with 'fill_value', the default is the minimum value along the specified dimension.

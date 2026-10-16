@@ -27,17 +27,20 @@ def _make_engine(monkeypatch):
     engine.model_path = "MOCK_WEIGHT"
     calls = {"n": 0}
 
-    def fake_process_pil_image(image):
-        calls["n"] += 1
-        mean = float(np.array(image).mean()) / 255.0
-        return {
-            "anomaly_map": np.full((392, 392), mean, dtype=np.float32),
-            "sample_score": mean,
-            "processed_size": (392, 392),
-            "original_size": image.size,
-        }
+    def fake_process_pil_images(images):
+        calls["n"] += len(images)
+        results = []
+        for image in images:
+            mean = float(np.array(image).mean()) / 255.0
+            results.append({
+                "anomaly_map": np.full((392, 392), mean, dtype=np.float32),
+                "sample_score": mean,
+                "processed_size": (392, 392),
+                "original_size": image.size,
+            })
+        return results
 
-    monkeypatch.setattr(engine, "process_pil_image", fake_process_pil_image)
+    monkeypatch.setattr(engine, "process_pil_images", fake_process_pil_images)
     return engine, calls
 
 

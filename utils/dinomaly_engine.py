@@ -38,6 +38,10 @@ ALGO_DIR = _PROJECT_ROOT / "core" / "anomaly" / "dinomaly"
 ALGO_PACKAGES_DIR = _PROJECT_ROOT / "core" / "algo_packages"
 DEFAULT_WEIGHT_PATH = ALGO_DIR / "weights" / "coating_anomaly_final.pth"
 
+# 合批推理 chunk 上限：默认单批 25（"very long" 全片子图数，一次前向最快）；
+# 小显存现场可经 env DINOMALY_MAX_BATCH 调低（如 13 → 分 13+12 两批）
+MAX_INFERENCE_BATCH = int(os.getenv("DINOMALY_MAX_BATCH", "25"))
+
 # 共享算法包（models/ 由 dinomaly 与 predgru 两链合并而成，必须先于各算法目录挂载，
 # 避免同进程内两个引擎的 models 顶层包互相遮蔽）；utils_/dataset 在 ALGO_DIR 下
 if str(ALGO_PACKAGES_DIR) not in sys.path:
@@ -114,23 +118,37 @@ class DinomalyEngine:
     # ---------- 推理 ----------
 
     def process_pil_image(self, image: Image.Image) -> Dict:
+        """单图推理（square 分支用）：薄包装，委托合批入口取 B=1。"""
+        return self.process_pil_images([image])[0]
+
+    def process_pil_images(self, images: List[Image.Image]) -> List[Dict]:
+        """合批推理：一次前向处理整批子图，逐样本返回（顺序 = 输入顺序）。
+
+        与逐片调用 process_pil_image 数值等价——eval 下 Prompt 逐样本选择
+        （core/algo_packages/models/prompt.py 本地补丁）。chunk 上限
+        MAX_INFERENCE_BATCH 防 VRAM 峰值，env DINOMALY_MAX_BATCH 可现场调低。
+        """
         import torch
 
-        img_tensor = self.transform(image).unsqueeze(0).to(self.device)
-        with torch.no_grad():
-            output = self.model(img_tensor)
-            en, de = output[0], output[1]
-            anomaly_map, _ = self._cal_anomaly_maps(en, de, img_tensor.shape[-1])
-            anomaly_map = self.gaussian_kernel(anomaly_map)
-            sample_score = torch.max(anomaly_map.flatten(1), dim=1)[0].item()
-            anomaly_map_np = anomaly_map[0, 0, :, :].cpu().numpy()
-
-        return {
-            "anomaly_map": anomaly_map_np,
-            "sample_score": sample_score,
-            "processed_size": anomaly_map_np.shape,
-            "original_size": image.size,
-        }
+        results = []
+        for start in range(0, len(images), MAX_INFERENCE_BATCH):
+            chunk = images[start:start + MAX_INFERENCE_BATCH]
+            tensors = torch.stack([self.transform(img) for img in chunk]).to(self.device)
+            with torch.no_grad():
+                output = self.model(tensors)
+                en, de = output[0], output[1]
+                anomaly_map, _ = self._cal_anomaly_maps(en, de, tensors.shape[-1])
+                anomaly_map = self.gaussian_kernel(anomaly_map)
+                scores = torch.max(anomaly_map.flatten(1), dim=1)[0].tolist()
+            maps_np = anomaly_map[:, 0].cpu().numpy()
+            for i, image in enumerate(chunk):
+                results.append({
+                    "anomaly_map": maps_np[i],
+                    "sample_score": scores[i],
+                    "processed_size": maps_np[i].shape,
+                    "original_size": image.size,
+                })
+        return results
 
     # ---------- 判定（与服务器版公式一致） ----------
 
@@ -405,10 +423,9 @@ class DinomalyEngine:
         if detect_n > 0 and len(crops) > 2 * detect_n:
             crops = crops[detect_n:-detect_n]  # 检测排除：边缘子图不推理（省算力）
 
-        crops_results = []
-        for crop_image, position in crops:
-            result = self.process_pil_image(crop_image)
-            crops_results.append((result, position))
+        # 合批推理（detect 排除后的剩余子图一次前向；结果顺序 = crops 顺序）
+        crops_results = list(zip(self.process_pil_images([crop for crop, _ in crops]),
+                                 [position for _, position in crops]))
 
         merged = self._merge_crop_results(crops_results, image.size,
                                           detect_n=detect_n, judge_n=judge_n,
@@ -458,10 +475,9 @@ class DinomalyEngine:
         if detect_n > 0 and len(crops) > 2 * detect_n:
             crops = crops[detect_n:-detect_n]
 
-        crops_results = []
-        for crop_image, position in crops:
-            result = self.process_pil_image(crop_image)
-            crops_results.append((result, position))
+        # 合批推理（detect 排除后的剩余子图一次前向；结果顺序 = crops 顺序）
+        crops_results = list(zip(self.process_pil_images([crop for crop, _ in crops]),
+                                 [position for _, position in crops]))
 
         merged = self._merge_crop_results(crops_results, image.size,
                                           detect_n=detect_n, judge_n=judge_n,

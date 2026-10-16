@@ -26,17 +26,20 @@ def _make_engine(monkeypatch) -> DinomalyEngine:
     engine.threshold = 0.21
     engine.model_path = "MOCK_WEIGHT"
 
-    def fake_process_pil_image(image):
-        arr = np.array(image)
-        mean = float(arr.mean()) / 255.0
-        return {
-            "anomaly_map": np.full((392, 392), mean, dtype=np.float32),
-            "sample_score": mean,
-            "processed_size": (392, 392),
-            "original_size": image.size,
-        }
+    def fake_process_pil_images(images):
+        results = []
+        for image in images:
+            arr = np.array(image)
+            mean = float(arr.mean()) / 255.0
+            results.append({
+                "anomaly_map": np.full((392, 392), mean, dtype=np.float32),
+                "sample_score": mean,
+                "processed_size": (392, 392),
+                "original_size": image.size,
+            })
+        return results
 
-    monkeypatch.setattr(engine, "process_pil_image", fake_process_pil_image)
+    monkeypatch.setattr(engine, "process_pil_images", fake_process_pil_images)
     return engine
 
 
@@ -81,22 +84,23 @@ def test_process_array_gray8_expands_to_rgb(monkeypatch):
     engine = _make_engine(monkeypatch)
     seen = {}
 
-    def spy(image):
-        arr = np.array(image)
-        seen["shape"] = arr.shape
-        seen["mode"] = image.mode
-        # 灰度复制语义锚点：三通道逐像素相等（随机图防常数蒙混）
-        seen.setdefault("chan_eq", []).append(
-            bool(np.array_equal(arr[..., 0], arr[..., 1])
-                 and np.array_equal(arr[..., 1], arr[..., 2])))
-        return {
+    def spy(images):
+        for image in images:
+            arr = np.array(image)
+            seen["shape"] = arr.shape
+            seen["mode"] = image.mode
+            # 灰度复制语义锚点：三通道逐像素相等（随机图防常数蒙混）
+            seen.setdefault("chan_eq", []).append(
+                bool(np.array_equal(arr[..., 0], arr[..., 1])
+                     and np.array_equal(arr[..., 1], arr[..., 2])))
+        return [{
             "anomaly_map": np.zeros((392, 392), dtype=np.float32),
             "sample_score": 0.0,
             "processed_size": (392, 392),
             "original_size": image.size,
-        }
+        } for image in images]
 
-    monkeypatch.setattr(engine, "process_pil_image", spy)
+    monkeypatch.setattr(engine, "process_pil_images", spy)
     rng = np.random.default_rng(11)
     gray = rng.integers(0, 256, size=(H, W), dtype=np.uint8)
     engine.process_array(gray, image_type="very long")
@@ -104,6 +108,72 @@ def test_process_array_gray8_expands_to_rgb(monkeypatch):
     assert seen["shape"][0] == H and seen["shape"][2] == 3
     assert seen["mode"] == "RGB"
     assert len(seen["chan_eq"]) == 25 and all(seen["chan_eq"])
+
+
+def test_process_array_batch_order_preserved(monkeypatch):
+    """合批推理：结果顺序与 crops 顺序对齐（judge/display 位置排除的正确性前提）。"""
+    engine = _make_engine(monkeypatch)
+    batches = []
+
+    def fake_images(images):
+        batches.append(len(images))
+        results = []
+        for image in images:
+            arr = np.array(image)
+            mean = float(arr.mean()) / 255.0
+            results.append({
+                "anomaly_map": np.full((392, 392), mean, dtype=np.float32),
+                "sample_score": mean,
+                "processed_size": (392, 392),
+                "original_size": image.size,
+            })
+        return results
+
+    monkeypatch.setattr(engine, "process_pil_images", fake_images)
+    # 第 i 片列值 = 10*i → 片均值唯一，crop_results 分数须按位对应
+    gray = np.zeros((H, W), dtype=np.uint8)
+    for i in range(25):
+        gray[:, i * 100:(i + 1) * 100] = 10 * i
+    _, _, metrics = engine.process_array(gray, image_type="very long")
+
+    assert batches == [25]  # 默认单批全量
+    scores = [c["sample_score"] for c in metrics["crop_results"]]
+    assert len(scores) == 25
+    for i, score in enumerate(scores):
+        assert score == pytest.approx(10 * i / 255), f"crop {i} 分数错位: {score}"
+
+
+def test_process_pil_images_chunks_and_order(monkeypatch):
+    """chunk 切分：MAX_INFERENCE_BATCH=7 → 前向 4 次（7+7+7+4），结果顺序保持。"""
+    import torch
+    from PIL import Image
+
+    monkeypatch.setattr("utils.dinomaly_engine.MAX_INFERENCE_BATCH", 7)
+    engine = object.__new__(DinomalyEngine)
+    engine.threshold = 0.21
+    engine.model_path = "MOCK_WEIGHT"
+    engine.device = "cpu"
+    engine.transform = lambda img: torch.zeros(3, 4, 4)
+    engine.gaussian_kernel = lambda x: x
+    engine._cal_anomaly_maps = lambda en, de, size: (torch.zeros(en.shape[0], 1, 4, 4), None)
+
+    batch_sizes = []
+
+    class FakeModel:
+        def __call__(self, tensors):
+            batch_sizes.append(tensors.shape[0])
+            return (tensors, tensors)
+
+    engine.model = FakeModel()
+
+    images = [Image.new("RGB", (i + 1, 2)) for i in range(25)]
+    results = engine.process_pil_images(images)
+
+    assert batch_sizes == [7, 7, 7, 4]
+    assert len(results) == 25
+    assert [r["original_size"][0] for r in results] == list(range(1, 26))  # 顺序保持
+    assert all(r["sample_score"] == 0.0 for r in results)
+    assert results[0]["processed_size"] == (4, 4)
 
 
 def test_process_array_square_branch(monkeypatch):
