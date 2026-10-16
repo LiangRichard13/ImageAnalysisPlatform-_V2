@@ -30,6 +30,8 @@ _KEEPALIVE_THREADS = []
 PREVIEW_SOURCE_MAX_W = 1600
 # 弹性预览框的最低高度（长图为宽度占满的扁条；框体吸收左列余量）
 PREVIEW_MIN_H = 48
+# 结果图源图最长边上限：等比显示无需全分辨率源，限制两张结果图的常驻内存
+RESULT_SOURCE_MAX_EDGE = 3200
 
 
 class _PreviewLabel(QLabel):
@@ -46,6 +48,51 @@ class _PreviewLabel(QLabel):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._on_resized()
+
+
+class _ResultImageLabel(QLabel):
+    """结果图 QLabel：显示区尺寸变化时按源图等比重缩放（弹性结果视窗）。
+
+    修复陈旧缩放：结果图原先只在设置那一刻按当时区域尺寸缩放一次，
+    分割条拖动/窗口缩放/先于布局到达的结果都不再跟随，长条图
+    放大区域后不抵左右两侧。源图长边超上限先降采样，避免全尺寸
+    QPixmap 常驻（预测 + 热力图两张）。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._source = None  # QPixmap，长边 ≤ RESULT_SOURCE_MAX_EDGE
+
+    def set_source_pixmap(self, pixmap):
+        """设置源图并按当前区域等比显示；null 清空。"""
+        if pixmap is None or pixmap.isNull():
+            self.show_text("")
+            return
+        if max(pixmap.width(), pixmap.height()) > RESULT_SOURCE_MAX_EDGE:
+            pixmap = pixmap.scaled(RESULT_SOURCE_MAX_EDGE, RESULT_SOURCE_MAX_EDGE,
+                                   Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._source = pixmap
+        self._rescale(smooth=True)  # 首次显示用高质量插值，拖动中的重算用 Fast
+
+    def show_text(self, text):
+        """显示占位/错误文本（清除源引用，防 resize 按残留源复活图像）。"""
+        self._source = None
+        self.setText(text)
+
+    def clear_result(self):
+        self.show_text("")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._rescale()
+
+    def _rescale(self, smooth: bool = False):
+        if self._source is None:
+            return
+        w = max(self.width() - 10, 40)   # 留出边框空间
+        h = max(self.height() - 10, 40)
+        mode = Qt.SmoothTransformation if smooth else Qt.FastTransformation
+        self.setPixmap(self._source.scaled(w, h, Qt.KeepAspectRatio, mode))
 
 
 class ImageProcessingThread(QThread):
@@ -641,7 +688,7 @@ class AnomalyDetectionWidget(QWidget):
         layout = QVBoxLayout(tab_widget)
         
         # 图片显示区域（深底：图像沉入背景，占位文字用暗色）
-        image_display = QLabel()
+        image_display = _ResultImageLabel()
         image_display.setAlignment(Qt.AlignCenter)
         image_display.setStyleSheet(f"""
             QLabel {{
@@ -857,16 +904,14 @@ class AnomalyDetectionWidget(QWidget):
                     f"level={payload.get('anomaly_level')}")
 
     def _display_qimage(self, tab_widget, qimg, result_type):
-        """QImage 显示到结果 tab（QImage→QPixmap→Fast 缩放，2000 万像素 Smooth 过慢）"""
+        """QImage 显示到结果 tab（转 QPixmap 交弹性结果视窗：设置 + 尺寸变化均跟随）"""
         try:
             scroll_area = tab_widget.findChild(QScrollArea)
             if scroll_area:
                 image_display = scroll_area.widget()
-                if isinstance(image_display, QLabel):
-                    image_display.setPixmap(QPixmap.fromImage(qimg).scaled(
-                        image_display.size(), Qt.KeepAspectRatio,
-                        Qt.FastTransformation))
-                else:
+                if isinstance(image_display, _ResultImageLabel):
+                    image_display.set_source_pixmap(QPixmap.fromImage(qimg))
+                elif isinstance(image_display, QLabel):
                     image_display.setText(f"无法加载{result_type}图片")
         except Exception as e:
             logger.error(f"显示{result_type}失败: {str(e)}")
@@ -1210,19 +1255,13 @@ class AnomalyDetectionWidget(QWidget):
                 scroll_area = tab_widget.findChild(QScrollArea)
                 if scroll_area:
                     image_display = scroll_area.widget()
-                    if isinstance(image_display, QLabel):
+                    if isinstance(image_display, _ResultImageLabel):
                         pixmap = QPixmap(image_path)
                         if not pixmap.isNull():
-                            # 缩放图片以适应显示区域
-                            scaled_pixmap = pixmap.scaled(
-                                image_display.size(), 
-                                Qt.KeepAspectRatio, 
-                                Qt.SmoothTransformation
-                            )
-                            image_display.setPixmap(scaled_pixmap)
+                            image_display.set_source_pixmap(pixmap)
                         else:
-                            image_display.setText(f"无法加载{result_type}图片")
-                    else:
+                            image_display.show_text(f"无法加载{result_type}图片")
+                    elif isinstance(image_display, QLabel):
                         image_display.setText(f"无法加载{result_type}图片")
             else:
                 # 获取标签页中的图片显示组件
@@ -1362,7 +1401,9 @@ class AnomalyDetectionWidget(QWidget):
         scroll_area = tab_widget.findChild(QScrollArea)
         if scroll_area:
             image_display = scroll_area.widget()
-            if isinstance(image_display, QLabel):
+            if isinstance(image_display, _ResultImageLabel):
+                image_display.show_text(f"暂无{result_type}")  # 源引用一并释放
+            elif isinstance(image_display, QLabel):
                 image_display.clear()
                 image_display.setText(f"暂无{result_type}")
         
