@@ -97,6 +97,32 @@
 
 以上 1+2+3 全部落地后，realtime 有望压进 1 s 预算内，跟上 1 fps 生产节奏。
 
+## 优化落地结果（2026-10-16，同机同图三轮均值）
+
+| 阶段 | 优化前基线 | 优化后（三轮均值） | 收益 | 优化内容 |
+|---|---|---|---|---|
+| engine | 1878.0 ms | 1294.9 ms | −583 ms | ① cvtColor（同环境 A/B −293ms）+ ② 合批推理（−493ms，含环境漂移交叉） |
+| ui | 139.1 ms | 105.2 ms | −34 ms | ③ 显示 QImage 上抛前降采样（3×INTER_AREA 源扫描 ~100ms 为新下限） |
+| **realtime** | **2017.1 ms** | **≈1400.2 ms** | **−617 ms（−31%）** | — |
+
+三轮：1412.5 / 1379.4 / 1408.7 ms（98 张计入统计，seed=42）。
+
+### 数值等价性（tools/verify_batch_equiv.py，20 张真实权重 GPU）
+
+- **操作等价达标**：500 crops 判定级别 0 变化、overall 判定逐图一致、
+  max|Δoverall_score| = 1.9e-3
+- prompt_idx 翻转 3/500：近平局 prompt（top2 相似度差距 ~4e-6）在 B=1 与
+  B=25 注意力 GEMM 归约顺序差异下随机翻转——FP 非结合性，严格逐位等价
+  原理上不可达；翻转仅使该 crop 分数 ±4e-3 抖动
+- VRAM 峰值 2.74 GiB（batch=25 一次前向），确认默认 `MAX_INFERENCE_BATCH=25`
+
+### 未达 1s 的剩余差距与下一杠杆
+
+realtime 1400ms 距 1fps 预算（1000ms）尚差 ~400ms。分解：engine 1295ms 中
+25× torchvision transform（PIL Resize 448 + CenterCrop 392 + Normalize，
+CPU 串行）占 ~250-350ms——**线程池并行 transform** 是下一杠杆（计划明确列为
+追加项，未实施）。其余为 crop ~190ms / 批前向 ~300-400ms / 合并+归一化 ~275ms。
+
 ## 复现
 
 ```bash
