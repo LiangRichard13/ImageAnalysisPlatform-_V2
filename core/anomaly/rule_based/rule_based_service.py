@@ -52,6 +52,26 @@ SMOOTH_KERNEL_SIZE = 31
 REF_HEIGHT = 1000
 
 
+def _resolve_threshold(default: float = 0.21) -> float:
+    """读 ANOMALY_THRESHOLD（0-1 浮点）作判定阈值；无效/越界告警并回退默认值。
+
+    与 utils/anomaly_config.py:resolve_anomaly_threshold 同逻辑（本脚本独立
+    部署、sys.path 不含仓库根，故本地内嵌；改动需两处同步）。
+    """
+    raw = os.getenv("ANOMALY_THRESHOLD", "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        LOGGER.warning("ANOMALY_THRESHOLD 配置无效: %s，使用默认值 %s", raw, default)
+        return default
+    if not 0.0 < value < 1.0:
+        LOGGER.warning("ANOMALY_THRESHOLD 超出 (0,1) 区间: %s，使用默认值 %s", raw, default)
+        return default
+    return value
+
+
 def _odd(value: float, minimum: int = 3) -> int:
     # cv2 的核尺寸/blockSize 必须为正奇数
     v = max(int(round(value)), minimum)
@@ -348,8 +368,8 @@ class AnomalyProcessorService:
 
     def _get_anomaly_level(self, score: float) -> str:
         if score <= self.threshold:
-            return "很可能正常"
-        return "很可能异常"
+            return "正常"
+        return "异常"
 
     def _calculate_analog_voltage(self, score: float) -> float:
         if score <= self.threshold:
@@ -550,7 +570,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input_dir", type=str, default=str(Path(__file__).resolve().parent / "input"))
     parser.add_argument("--output_dir", type=str, default=str(Path(__file__).resolve().parent / "output"))
     parser.add_argument("--poll_interval", type=float, default=2.0)
-    parser.add_argument("--threshold", type=float, default=0.21)
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="判定阈值（score>阈值 判异常）；缺省读环境变量 ANOMALY_THRESHOLD，均未设置时 0.21",
+    )
     parser.add_argument(
         "--process", type=str, default=None,
         help="单图验证模式：直接处理指定图像并输出三件套后退出，不进入目录轮询",
@@ -610,6 +635,7 @@ def main() -> None:
     setup_logging()
     parser = build_argument_parser()
     args = parser.parse_args()
+    args.threshold = args.threshold if args.threshold is not None else _resolve_threshold()
 
     # 单图验证模式：无需 input/output 共享目录与 request.json
     if args.process:

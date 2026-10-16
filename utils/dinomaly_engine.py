@@ -26,6 +26,8 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from utils.anomaly_config import resolve_anomaly_threshold
+
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -39,8 +41,6 @@ if str(ALGO_PACKAGES_DIR) not in sys.path:
     sys.path.insert(0, str(ALGO_PACKAGES_DIR))
 if str(ALGO_DIR) not in sys.path:
     sys.path.insert(1, str(ALGO_DIR))
-
-_THRESHOLD = 0.21
 
 
 def _min_max_norm(arr) -> np.ndarray:
@@ -75,7 +75,7 @@ class DinomalyEngine:
         self.model_path = model_path or os.getenv("ANOMALY_MODEL_PATH") or str(DEFAULT_WEIGHT_PATH)
         available_device = device or "cuda:0"
         self.device = available_device if torch.cuda.is_available() else "cpu"
-        self.threshold = _THRESHOLD
+        self.threshold = resolve_anomaly_threshold()  # ANOMALY_THRESHOLD 可覆盖，默认 0.21
 
         logger.info("Loading Dinomaly model to device: %s", self.device)
         logger.info("Model checkpoint: %s", self.model_path)
@@ -133,13 +133,13 @@ class DinomalyEngine:
 
     def _get_anomaly_level(self, score: float) -> str:
         if score <= self.threshold:
-            return "很可能正常"
-        return "很可能异常"
+            return "正常"
+        return "异常"
 
     def _get_overall_anomaly_level(self, scores) -> str:
         if any(score > self.threshold for score in scores):
-            return "很可能异常"
-        return "很可能正常"
+            return "异常"
+        return "正常"
 
     def _calculate_analog_voltage(self, score: float) -> float:
         if score <= self.threshold:

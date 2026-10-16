@@ -1267,7 +1267,7 @@ class AnomalyDetectionWidget(QWidget):
             anomaly_level = json_data.get('anomaly_level', '')
 
             # 检查是否为需要弹出警告的异常级别
-            if anomaly_level in ['中等异常可能性', '很可能异常']:
+            if anomaly_level == '异常':
                 if not self._alerts_popup_enabled():
                     logger.info(f"检测到异常级别: {anomaly_level}"
                                 f"（弹窗已禁用：ANOMALY_ALERT_POPUP_ENABLED=0，仅记录日志）")

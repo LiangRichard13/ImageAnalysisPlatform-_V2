@@ -36,13 +36,13 @@ widget.show_anomaly_warning = lambda level, data: calls.append(level)
 def _trigger():
     calls.clear()
     widget.check_anomaly_level(
-        {"anomaly_level": "很可能异常", "analog_voltage": 3.3})
+        {"anomaly_level": "异常", "analog_voltage": 3.3})
 
 
 # 1) 未设置：默认弹出（向后兼容）
 os.environ.pop("ANOMALY_ALERT_POPUP_ENABLED", None)
 _trigger()
-assert calls == ["很可能异常"], f"默认应弹出, got {calls}"
+assert calls == ["异常"], f"默认应弹出, got {calls}"
 
 # 2) =0：禁用弹窗（仅记日志）
 os.environ["ANOMALY_ALERT_POPUP_ENABLED"] = "0"
@@ -57,22 +57,22 @@ assert calls == [], f"false 应禁用弹窗, got {calls}"
 # 4) =1：弹出
 os.environ["ANOMALY_ALERT_POPUP_ENABLED"] = "1"
 _trigger()
-assert calls == ["很可能异常"], f"1 应启用弹窗, got {calls}"
+assert calls == ["异常"], f"1 应启用弹窗, got {calls}"
 
 # 5) =true：弹出
 os.environ["ANOMALY_ALERT_POPUP_ENABLED"] = "true"
 _trigger()
-assert calls == ["很可能异常"]
+assert calls == ["异常"]
 
 # 6) 无效值：告警并回退默认开启
 os.environ["ANOMALY_ALERT_POPUP_ENABLED"] = "abc"
 _trigger()
-assert calls == ["很可能异常"], f"无效值应回退默认开启, got {calls}"
+assert calls == ["异常"], f"无效值应回退默认开启, got {calls}"
 
 # 非异常级别任何取值都不弹
 os.environ["ANOMALY_ALERT_POPUP_ENABLED"] = "1"
 calls.clear()
-widget.check_anomaly_level({"anomaly_level": "很可能正常"})
+widget.check_anomaly_level({"anomaly_level": "正常"})
 assert calls == [], "正常级别不应弹窗"
 
 widget.close()

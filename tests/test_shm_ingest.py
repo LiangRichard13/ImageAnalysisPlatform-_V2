@@ -63,7 +63,7 @@ def test_ingest_full_pipeline(tmp_path):
         seq, payload, gray_img, pred_img, heat_img = results[-1]
         assert seq >= 1
         assert payload["process_id"]
-        assert payload["anomaly_level"] in ("很可能正常", "很可能异常")
+        assert payload["anomaly_level"] in ("正常", "异常")
         # UI 展示用 QImage：非空且尺寸与帧一致（JET 上色后为 RGB888 三通道）
         assert not gray_img.isNull() and gray_img.width() == 320 and gray_img.height() == 200
         assert not pred_img.isNull() and pred_img.width() == 320 and pred_img.height() == 200

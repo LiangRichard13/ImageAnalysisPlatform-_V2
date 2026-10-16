@@ -132,7 +132,7 @@ class TestFrameRing:
 class TestResultRing:
     def test_result_roundtrip(self, rig):
         pred, heat = make_frame(2), make_frame(3)
-        payload = {"anomaly_level": "很可能异常", "score": 0.5, "nested": {"a": [1, 2]}}
+        payload = {"anomaly_level": "异常", "score": 0.5, "nested": {"a": [1, 2]}}
         seq = rig["rproducer"].write_result(1, payload, pred, heat)
         assert seq == 1
         assert rig["evt_result"].wait(0) is True

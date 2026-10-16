@@ -94,9 +94,9 @@ def test_overall_score_empty_when_only_edge_wrinkles():
 def test_voltage_and_level_agree_at_threshold():
     # 阈值边界必须自洽：score==threshold 归正常且 0V（不再出现"判异常但 0V"）
     pipeline = RuleBasedWrinklePipeline(threshold=0.21)
-    assert pipeline._get_anomaly_level(0.21) == "很可能正常"
+    assert pipeline._get_anomaly_level(0.21) == "正常"
     assert pipeline._calculate_analog_voltage(0.21) == 0.0
-    assert pipeline._get_anomaly_level(0.22) == "很可能异常"
+    assert pipeline._get_anomaly_level(0.22) == "异常"
     assert pipeline._calculate_analog_voltage(0.22) > 0.0
 
 

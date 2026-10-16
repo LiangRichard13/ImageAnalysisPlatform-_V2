@@ -30,9 +30,9 @@ ACCENT_HOVER = "#22B9D9"
 ACCENT_PRESSED = "#008FB0"
 ACCENT_TEXT = "#062A31"    # 实心青蓝上的深字（白字对比不足）
 
-OK = "#3FCF8E"             # 在线/运行中/很可能正常
-WARN = "#FFB020"           # 等待/正在停止/中等异常可能性
-ALARM = "#FF5252"          # 很可能异常/错误/终止
+OK = "#3FCF8E"             # 在线/运行中/正常
+WARN = "#FFB020"           # 等待/正在停止
+ALARM = "#FF5252"          # 异常/错误/终止
 ALARM_HOVER = "#FF6B6B"
 ALARM_PRESSED = "#D94848"
 ALARM_TEXT = "#2B0A0A"

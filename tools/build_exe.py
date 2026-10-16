@@ -27,6 +27,8 @@ IPC_MODE=file
 ANOMALY_ALERT_AUTO_CLOSE_MS=5000
 # 异常警告弹窗开关：1=弹出（默认），0=不弹窗仅记日志
 ANOMALY_ALERT_POPUP_ENABLED=1
+# 异常判定阈值（0-1 浮点，score>阈值 判异常；默认 0.21）
+ANOMALY_THRESHOLD=0.21
 """
 
 

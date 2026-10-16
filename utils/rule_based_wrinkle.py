@@ -23,6 +23,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
+from utils.anomaly_config import resolve_anomaly_threshold
+
 logger = logging.getLogger(__name__)
 
 # JSON 展示用的子图划分：全图宽度 25 等分，与 Dinomaly 版 fixed_crop 的全图划分语义对齐，
@@ -257,14 +259,15 @@ class RuleBasedWrinkleCore:
 class RuleBasedWrinklePipeline:
     """检测 + 三件套合成 + 落盘的一体化管线"""
 
-    def __init__(self, threshold: float = 0.21, detector: Optional[RuleBasedWrinkleCore] = None):
-        self.threshold = threshold
+    def __init__(self, threshold: Optional[float] = None, detector: Optional[RuleBasedWrinkleCore] = None):
+        # 阈值缺省读 ANOMALY_THRESHOLD 环境变量（默认 0.21，见 utils/anomaly_config.py）
+        self.threshold = threshold if threshold is not None else resolve_anomaly_threshold()
         self.detector = detector or RuleBasedWrinkleCore()
 
     def _get_anomaly_level(self, score: float) -> str:
         if score <= self.threshold:
-            return "很可能正常"
-        return "很可能异常"
+            return "正常"
+        return "异常"
 
     def _calculate_analog_voltage(self, score: float) -> float:
         if score <= self.threshold:

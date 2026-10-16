@@ -80,7 +80,7 @@ class TestC1SlotSizing:
         try:
             pred = np.zeros((h, w), np.uint8)
             heat = np.full((h, w), 77, np.uint8)
-            payload = {"anomaly_level": "很可能异常", "中文": "键值"}
+            payload = {"anomaly_level": "异常", "中文": "键值"}
             seq = producer.write_result(1, payload, pred, heat)
             assert seq == 1
             got = consumer.fetch_latest(last_seq=0, wait_ms=1000)

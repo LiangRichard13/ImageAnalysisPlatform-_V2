@@ -31,7 +31,7 @@ class TestProcessFromArray:
             "anomaly_map": f"{client.process_id}.png",
             "heatmap": f"{client.process_id}_heatmap.png",
         }
-        assert metrics["anomaly_level"] in ("很可能正常", "很可能异常")
+        assert metrics["anomaly_level"] in ("正常", "异常")
 
 
 class TestArchiveWorker:
