@@ -75,9 +75,11 @@ def _contour(x: int, y: int, w: int, h: int) -> np.ndarray:
 
 
 def test_compose_anomaly_map_matches_legacy_formula():
-    """LUT 归一化锚点：输出与旧向量化 float 公式逐像素一致（bitwise）。"""
-    from utils.rule_based_wrinkle import SMOOTH_KERNEL_SIZE, min_max_norm
+    """LUT 归一化锚点：输出与旧向量化 float 公式逐像素一致（bitwise）。
 
+    参考链刻意内联公式与核尺寸（不从被测模块导入 min_max_norm /
+    SMOOTH_KERNEL_SIZE）——否则实现一改锚点跟着漂，钉不住旧语义。
+    """
     pipe = RuleBasedWrinklePipeline()
     wrinkles = [
         {"severity": 2, "contours": [_contour(5, 5, 30, 60)]},
@@ -86,14 +88,15 @@ def test_compose_anomaly_map_matches_legacy_formula():
     ]
     got = pipe._compose_anomaly_map((100, 250), wrinkles)
 
-    # 旧实现独立重算：severity 升序后画轮廓 → 高斯 → float32 min-max → ×255 截断
+    # 旧实现独立重算：severity 升序后画轮廓 → 高斯(31) → float32 min-max → ×255 截断
     canvas = np.zeros((100, 250), dtype=np.uint8)
     for wr in sorted(wrinkles, key=lambda item: item["severity"]):
         cv2.drawContours(canvas, wr["contours"], -1,
                          int(min(255, 100 + (wr["severity"] - 1) * 39)),
                          thickness=cv2.FILLED)
-    smoothed = cv2.GaussianBlur(canvas, (SMOOTH_KERNEL_SIZE, SMOOTH_KERNEL_SIZE), 0)
-    legacy = (min_max_norm(smoothed.astype(np.float32)) * 255).astype(np.uint8)
+    smoothed = cv2.GaussianBlur(canvas, (31, 31), 0)
+    legacy = ((smoothed.astype(np.float32) - smoothed.min())
+              / (smoothed.max() - smoothed.min()) * 255).astype(np.uint8)
     np.testing.assert_array_equal(got, legacy)
     assert got.min() < got.max()  # 场景非退化（确实经过了归一化）
 
@@ -103,34 +106,44 @@ def test_compose_anomaly_map_constant_canvas_no_warning():
     import warnings
 
     pipe = RuleBasedWrinklePipeline()
-    # 轮廓完全在画布外 → canvas 保持全 0 → min==max==0
-    wrinkles = [{"severity": 4, "contours": [_contour(5000, 5000, 30, 60)]}]
     with warnings.catch_warnings():
         warnings.simplefilter("error")  # 任何 RuntimeWarning 直接失败
+        # 轮廓完全在画布外 → canvas 保持全 0 → min==max==0
+        wrinkles = [{"severity": 4, "contours": [_contour(5000, 5000, 30, 60)]}]
         got = pipe._compose_anomaly_map((100, 250), wrinkles)
+        # severity-5（gray_val=255）整幅覆盖 → min==max==255 同一分支
+        full = [{"severity": 5, "contours": [_contour(0, 0, 250, 100)]}]
+        got255 = pipe._compose_anomaly_map((100, 250), full)
     assert got.shape == (100, 250) and not got.any()
+    assert got255.shape == (100, 250) and not got255.any()
 
 
-def test_preprocess_matches_legacy_chain():
-    """THRESH_BINARY_INV 锚点：preprocess 与旧版 BINARY+bitwise_not 链逐位一致。"""
+@pytest.mark.parametrize("scale", [1.0, 0.5])
+def test_preprocess_matches_legacy_chain(scale):
+    """THRESH_BINARY_INV 锚点：preprocess 与旧版 BINARY+bitwise_not 链逐位一致。
+
+    参考链参数以 _odd(...) 表达（连同取奇数语义一起钉住）；scale 覆盖生产
+    浮动值（h/1000）的一档非 1.0。
+    """
     from utils.rule_based_wrinkle import _odd
 
     rng = np.random.default_rng(3)
     gray = rng.integers(0, 256, size=(240, 320), dtype=np.uint8)
     gray = cv2.GaussianBlur(gray, (0, 0), 5)  # 造连续灰度，避免退化二值图
 
-    got = RuleBasedWrinklePipeline().detector.preprocess(gray, scale=1.0)
+    got = RuleBasedWrinklePipeline().detector.preprocess(gray, scale=scale)
 
     # 旧链独立重算
-    blurred = cv2.medianBlur(gray, 5)
+    blurred = cv2.medianBlur(gray, _odd(5 * scale))
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(blurred)
     binary = cv2.adaptiveThreshold(
-        enhanced, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, blockSize=201, C=25)
+        enhanced, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY,
+        blockSize=_odd(201 * scale, minimum=5), C=25)
     binary_inv = cv2.bitwise_not(binary)
-    vk = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 15))
+    vk = cv2.getStructuringElement(cv2.MORPH_RECT, (1, _odd(15 * scale)))
     refined = cv2.morphologyEx(binary_inv, cv2.MORPH_CLOSE, vk)
-    hk = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    hk = cv2.getStructuringElement(cv2.MORPH_RECT, (_odd(3 * scale), _odd(3 * scale)))
     legacy = cv2.morphologyEx(refined, cv2.MORPH_OPEN, hk)
 
     np.testing.assert_array_equal(got, legacy)

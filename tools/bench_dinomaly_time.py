@@ -141,6 +141,9 @@ def main() -> None:
                         help="shm 模式推理引擎（file 模式固定走服务器版 dinomaly 链路）")
     args = parser.parse_args()
 
+    if args.mode == "file" and args.engine != "dinomaly":
+        raise SystemExit("--engine 仅作用于 --mode shm（file 模式固定走服务器版 dinomaly 链路）")
+
     exts = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
     files = sorted(p for p in Path(args.image_dir).iterdir()
                    if p.is_file() and p.suffix.lower() in exts)
