@@ -78,13 +78,15 @@ def run_file_mode(args, picked: list) -> dict:
 
 
 def run_shm_mode(args, picked: list) -> dict:
-    from utils.anomaly_detection_client import ENGINE_DINOMALY, AnomalyDetectionClient
+    from utils.anomaly_detection_client import (
+        ENGINE_DINOMALY, ENGINE_RULE_BASED, AnomalyDetectionClient)
     from utils.archive_worker import ArchiveItem, ArchiveWorker
     from utils.dinomaly_engine import DEFAULT_WEIGHT_PATH
     from utils.shm_ingest import (
         _PREVIEW_MAX_EDGE, _RESULT_MAX_EDGE, _downscale,
         _to_qimage_gray, _to_qimage_jet)
 
+    engine_name = ENGINE_RULE_BASED if args.engine == "rule_based" else ENGINE_DINOMALY
     client = AnomalyDetectionClient()
     tmp_archive = Path(args.image_dir).parent / "_bench_dinomaly_archive_out"
     shutil.rmtree(tmp_archive, ignore_errors=True)
@@ -98,14 +100,17 @@ def run_shm_mode(args, picked: list) -> dict:
         t["decode"] = time.perf_counter() - t0  # 参考值：真实 shm 帧内存直达，无此开销
 
         t0 = time.perf_counter()
-        pred, heat, metrics = client.process_from_array(gray, ENGINE_DINOMALY, frame_id=0)
+        pred, heat, metrics = client.process_from_array(gray, engine_name, frame_id=0)
         t["engine"] = time.perf_counter() - t0
 
         t0 = time.perf_counter()
         # 与 shm_ingest._process_frame 的 emit 镜像：先降采样到显示端上限再转 QImage
+        # （pred/heat 同对象时只降一次，与 shm_ingest 同款）
+        pred_small = _downscale(pred, _RESULT_MAX_EDGE)
+        heat_small = pred_small if heat is pred else _downscale(heat, _RESULT_MAX_EDGE)
         _to_qimage_gray(_downscale(gray, _PREVIEW_MAX_EDGE))
-        _to_qimage_gray(_downscale(pred, _RESULT_MAX_EDGE))
-        _to_qimage_jet(_downscale(heat, _RESULT_MAX_EDGE))
+        _to_qimage_gray(pred_small)
+        _to_qimage_jet(heat_small)
         t["ui"] = time.perf_counter() - t0
 
         t["realtime"] = t["engine"] + t["ui"]  # 帧周期（未含 ring 写入 memcpy，memcpy 级）
@@ -132,6 +137,8 @@ def main() -> None:
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--mode", choices=["file", "shm"], default="file")
+    parser.add_argument("--engine", choices=["dinomaly", "rule_based"], default="dinomaly",
+                        help="shm 模式推理引擎（file 模式固定走服务器版 dinomaly 链路）")
     args = parser.parse_args()
 
     exts = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}

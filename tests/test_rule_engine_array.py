@@ -68,3 +68,70 @@ def test_process_array_matches_process_to_dir(tmp_path):
         if key == "timestamp":
             continue  # 两次调用时间必然不同
         assert file_json[key] == value, f"字段 {key} 不一致"
+
+
+def _contour(x: int, y: int, w: int, h: int) -> np.ndarray:
+    return np.array([[[x, y]], [[x + w, y]], [[x + w, y + h]], [[x, y + h]]], dtype=np.int32)
+
+
+def test_compose_anomaly_map_matches_legacy_formula():
+    """LUT 归一化锚点：输出与旧向量化 float 公式逐像素一致（bitwise）。"""
+    from utils.rule_based_wrinkle import SMOOTH_KERNEL_SIZE, min_max_norm
+
+    pipe = RuleBasedWrinklePipeline()
+    wrinkles = [
+        {"severity": 2, "contours": [_contour(5, 5, 30, 60)]},
+        {"severity": 5, "contours": [_contour(60, 10, 25, 80), _contour(150, 30, 20, 50)]},
+        {"severity": 3, "contours": [_contour(200, 0, 15, 90)]},
+    ]
+    got = pipe._compose_anomaly_map((100, 250), wrinkles)
+
+    # 旧实现独立重算：severity 升序后画轮廓 → 高斯 → float32 min-max → ×255 截断
+    canvas = np.zeros((100, 250), dtype=np.uint8)
+    for wr in sorted(wrinkles, key=lambda item: item["severity"]):
+        cv2.drawContours(canvas, wr["contours"], -1,
+                         int(min(255, 100 + (wr["severity"] - 1) * 39)),
+                         thickness=cv2.FILLED)
+    smoothed = cv2.GaussianBlur(canvas, (SMOOTH_KERNEL_SIZE, SMOOTH_KERNEL_SIZE), 0)
+    legacy = (min_max_norm(smoothed.astype(np.float32)) * 255).astype(np.uint8)
+    np.testing.assert_array_equal(got, legacy)
+    assert got.min() < got.max()  # 场景非退化（确实经过了归一化）
+
+
+def test_compose_anomaly_map_constant_canvas_no_warning():
+    """max==min 退化画布：返回全 0 且不产生 NaN cast 的 RuntimeWarning。"""
+    import warnings
+
+    pipe = RuleBasedWrinklePipeline()
+    # 轮廓完全在画布外 → canvas 保持全 0 → min==max==0
+    wrinkles = [{"severity": 4, "contours": [_contour(5000, 5000, 30, 60)]}]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # 任何 RuntimeWarning 直接失败
+        got = pipe._compose_anomaly_map((100, 250), wrinkles)
+    assert got.shape == (100, 250) and not got.any()
+
+
+def test_preprocess_matches_legacy_chain():
+    """THRESH_BINARY_INV 锚点：preprocess 与旧版 BINARY+bitwise_not 链逐位一致。"""
+    from utils.rule_based_wrinkle import _odd
+
+    rng = np.random.default_rng(3)
+    gray = rng.integers(0, 256, size=(240, 320), dtype=np.uint8)
+    gray = cv2.GaussianBlur(gray, (0, 0), 5)  # 造连续灰度，避免退化二值图
+
+    got = RuleBasedWrinklePipeline().detector.preprocess(gray, scale=1.0)
+
+    # 旧链独立重算
+    blurred = cv2.medianBlur(gray, 5)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(blurred)
+    binary = cv2.adaptiveThreshold(
+        enhanced, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, blockSize=201, C=25)
+    binary_inv = cv2.bitwise_not(binary)
+    vk = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 15))
+    refined = cv2.morphologyEx(binary_inv, cv2.MORPH_CLOSE, vk)
+    hk = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    legacy = cv2.morphologyEx(refined, cv2.MORPH_OPEN, hk)
+
+    np.testing.assert_array_equal(got, legacy)
+    assert set(np.unique(got)) <= {0, 255}
