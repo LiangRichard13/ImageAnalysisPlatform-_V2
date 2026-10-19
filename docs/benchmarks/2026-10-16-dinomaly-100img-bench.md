@@ -99,13 +99,21 @@
 
 ## 优化落地结果（2026-10-16，同机同图三轮均值）
 
-| 阶段 | 优化前基线 | 优化后（三轮均值） | 收益 | 优化内容 |
+| 阶段 | 优化前基线 | ①②③后 | ④后 | 优化内容 |
 |---|---|---|---|---|
-| engine | 1878.0 ms | 1294.9 ms | −583 ms | ① cvtColor（同环境 A/B −293ms）+ ② 合批推理（−493ms，含环境漂移交叉） |
-| ui | 139.1 ms | 105.2 ms | −34 ms | ③ 显示 QImage 上抛前降采样（3×INTER_AREA 源扫描 ~100ms 为新下限） |
-| **realtime** | **2017.1 ms** | **≈1400.2 ms** | **−617 ms（−31%）** | — |
+| engine | 1878.0 ms | 1294.9 ms | 938.4 ms | ① cvtColor −293ms（A/B）② 合批 −493ms ④ transform 线程池 −357ms |
+| ui | 139.1 ms | 105.2 ms | ~112 ms | ③ 显示 QImage 上抛前降采样 |
+| **realtime** | **2017.1 ms** | **≈1400.2 ms** | **≈1050.6 ms** | 累计 **−48%** |
 
-三轮：1412.5 / 1379.4 / 1408.7 ms（98 张计入统计，seed=42）。
+①②③三轮：1412.5 / 1379.4 / 1408.7 ms；④三轮：1061.3 / 1044.0 / 1046.5 ms
+（98 张计入统计，seed=42）。
+
+### ④ transform 线程池并行（bitwise 等价）
+
+- Step 0 实测拆分：transform 296-335ms / stack+H2D 8 / 前向(B=25) 215-228 / 后处理 2-3
+- 8-worker 常驻 ThreadPoolExecutor：transform 378→64ms（5.9×；PIL Resize 在 C 层、
+  ToTensor/Normalize 在 ATen CPU kernel，主体 GIL 外执行）
+- verify_batch_equiv 20 张各项与池化前逐项相同（bitwise 等价坐实）；105 测试全绿
 
 ### 数值等价性（tools/verify_batch_equiv.py，20 张真实权重 GPU）
 
@@ -118,10 +126,10 @@
 
 ### 未达 1s 的剩余差距与下一杠杆
 
-realtime 1400ms 距 1fps 预算（1000ms）尚差 ~400ms。分解：engine 1295ms 中
-25× torchvision transform（PIL Resize 448 + CenterCrop 392 + Normalize，
-CPU 串行）占 ~250-350ms——**线程池并行 transform** 是下一杠杆（计划明确列为
-追加项，未实施）。其余为 crop ~190ms / 批前向 ~300-400ms / 合并+归一化 ~275ms。
+realtime ~1051ms 距 1fps 预算（1000ms）尚差 ~51ms。候选（均未实施）：
+`_crop_fixed` 的 PIL 往返消除（全图 `np.array(PIL)` 96MB 回拷，估 −30-50ms，
+bitwise）；Step B CPU/GPU 流水线（transform 64ms 与前向 228ms 重叠，−64ms，
+引入 13+12 chunk 形状噪声需复核等价性）。两者都做 ≈ 940-980ms。
 
 ## 复现
 
