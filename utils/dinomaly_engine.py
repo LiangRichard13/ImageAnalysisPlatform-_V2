@@ -42,6 +42,22 @@ DEFAULT_WEIGHT_PATH = ALGO_DIR / "weights" / "coating_anomaly_final.pth"
 # 小显存现场可经 env DINOMALY_MAX_BATCH 调低（如 13 → 分 13+12 两批）
 MAX_INFERENCE_BATCH = int(os.getenv("DINOMALY_MAX_BATCH", "25"))
 
+# transform 并行池：PIL Resize 在 C 层、ToTensor/Normalize 在 ATen CPU kernel，
+# 主体计算 GIL 外执行，线程池可并行；每图调用同一 self.transform（无共享可变
+# 状态，线程安全），map 保序 → 数值 bitwise 不变。惰性常驻，免每帧建线程。
+_TRANSFORM_POOL: Optional["ThreadPoolExecutor"] = None
+
+
+def _get_transform_pool() -> "ThreadPoolExecutor":
+    global _TRANSFORM_POOL
+    if _TRANSFORM_POOL is None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        _TRANSFORM_POOL = ThreadPoolExecutor(
+            max_workers=min(8, os.cpu_count() or 4),
+            thread_name_prefix="DinomalyTransform")
+    return _TRANSFORM_POOL
+
 # 共享算法包（models/ 由 dinomaly 与 predgru 两链合并而成，必须先于各算法目录挂载，
 # 避免同进程内两个引擎的 models 顶层包互相遮蔽）；utils_/dataset 在 ALGO_DIR 下
 if str(ALGO_PACKAGES_DIR) not in sys.path:
@@ -133,7 +149,9 @@ class DinomalyEngine:
         results = []
         for start in range(0, len(images), MAX_INFERENCE_BATCH):
             chunk = images[start:start + MAX_INFERENCE_BATCH]
-            tensors = torch.stack([self.transform(img) for img in chunk]).to(self.device)
+            # 线程池并行 CPU transform（每图独立、map 保序，bitwise 不变）
+            tensors = torch.stack(
+                list(_get_transform_pool().map(self.transform, chunk))).to(self.device)
             with torch.no_grad():
                 output = self.model(tensors)
                 en, de = output[0], output[1]
