@@ -133,10 +133,39 @@ bitwise）；Step B CPU/GPU 流水线（transform 64ms 与前向 228ms 重叠，
 
 ## 复现
 
+## 规则化引擎（rule_based）优化（2026-10-19，实验→定位→优化→复测循环）
+
+基线（30 张 shm）realtime 699.7ms（engine 585 + ui 114）。定位：preprocess 345ms
+（medianBlur 100 / CLAHE 46 / adaptiveThreshold 100 / not 13 / CLOSE 64 / OPEN 69，
+cv2 全核并行下均为最优算子）+ 归一化 cast 186ms。
+
+| 轮次 | 改动 | bitwise | engine | realtime |
+|---|---|---|---|---|
+| 基线 | — | — | 585.4 | 699.7 |
+| R1 | 32MP float min-max 归一化 → 256 项 LUT 查表（同公式逐值等价，186→~5ms） | ✓ | 436.9* | 562.5* |
+| R2 | adaptiveThreshold 直接 THRESH_BINARY_INV（255-x == not(x)，省一趟全幅） | ✓ | ↑合并 | ↑合并 |
+| R3 | emit 处 pred/heat 同对象只降采样一次（两引擎共享，ui −33ms） | ✓ | — | 516.4 |
+
+\* R1-R3 合并复测。终验（100 张×3）见下。锚点测试 3 条钉死与旧公式/旧链逐位一致。
+
+### 终验数字（100 张 ×3，seed=42）
+
+realtime：465.9 / 509.0 / 502.9 ms → **均值 ≈493ms**（engine ≈412 + ui ≈81），
+较基线 699.7ms **−30%**；1fps 预算裕量约一倍。
+
+### 循环终止判定
+
+剩余 engine ~438ms 中 preprocess 占 ~76%（332ms）——cv2 内置最优算子且全核并行，
+语义不变前提下无进一步空间。软件层下一候选为 OpenCL/UMat 迁移 preprocess
+（预计 −200ms 级），但 CLAHE 插值等存在 bitwise 风险，**未实施**，需权衡后决策。
+收益曲线（700→562→516）呈明显递减，bitwise 红线内判定"无明显收益"。
+
 ```bash
 conda activate analysis_system
 # file 模式（文件轮询服务链路）
 python tools/bench_dinomaly_time.py --image_dir "E:\TestImg\2026-09-22(14.02)" --num 100 --seed 42
-# shm 模式（实时链路帧周期）
+# shm 模式（实时链路帧周期，dinomaly 引擎）
 python tools/bench_dinomaly_time.py --image_dir "E:\TestImg\2026-09-22(14.02)" --num 100 --seed 42 --mode shm
+# shm 模式（规则化引擎）
+python tools/bench_dinomaly_time.py --image_dir "E:\TestImg\2026-09-22(14.02)" --num 100 --seed 42 --mode shm --engine rule_based
 ```
