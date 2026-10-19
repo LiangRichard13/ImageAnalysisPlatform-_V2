@@ -215,10 +215,14 @@ class SharedMemoryIngestThread(QThread):
 
         self._last_seq = seq
         # 显示 QImage 上抛前降到显示端本来就会截断的尺寸（零质量损失）；
-        # 上面的 write_result/ArchiveItem 已拿全分辨率原值，不受影响
+        # 上面的 write_result/ArchiveItem 已拿全分辨率原值，不受影响。
+        # 两引擎的 pred/heat 均为同源同对象（process_array 返回同一数组两次），
+        # is 判定后只降采样一次，省一趟 32MP INTER_AREA（~33ms）
+        pred_small = _downscale(pred, _RESULT_MAX_EDGE)
+        heat_small = pred_small if heat is pred else _downscale(heat, _RESULT_MAX_EDGE)
         self.result_ready.emit(seq, metrics,
                                _to_qimage_gray(_downscale(gray, _PREVIEW_MAX_EDGE)),
-                               _to_qimage_gray(_downscale(pred, _RESULT_MAX_EDGE)),
-                               _to_qimage_jet(_downscale(heat, _RESULT_MAX_EDGE)))
+                               _to_qimage_gray(pred_small),
+                               _to_qimage_jet(heat_small))
         logger.info("实时处理完成 frame_seq=%s → result_seq=%s，耗时 %.0f ms",
                     seq, result_seq, (time.perf_counter() - t0) * 1000)
