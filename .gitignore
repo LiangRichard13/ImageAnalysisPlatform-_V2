@@ -37,3 +37,6 @@ Thumbs.db
 build/
 dist/
 *.spec.bak
+
+# 相机端模拟器构建副产物（build_camera_sim.py 以 CLI 参数为配置源，spec 每次自动生成）
+相机端模拟器.spec
