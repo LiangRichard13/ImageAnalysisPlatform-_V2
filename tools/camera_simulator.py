@@ -206,9 +206,9 @@ class CameraSimulatorWindow(QMainWindow):
         self.dir_edit.setReadOnly(True)
         self.dir_edit.textChanged.connect(self._validate_dir)
         row1.addWidget(self.dir_edit, stretch=1)
-        browse_btn = QPushButton("浏览...")
-        browse_btn.clicked.connect(self._browse)
-        row1.addWidget(browse_btn)
+        self.browse_btn = QPushButton("浏览...")
+        self.browse_btn.clicked.connect(self._browse)
+        row1.addWidget(self.browse_btn)
         layout.addLayout(row1)
 
         row2 = QHBoxLayout()
@@ -258,7 +258,10 @@ class CameraSimulatorWindow(QMainWindow):
             valid = bool(self.dir_edit.text().strip()) and Path(self.dir_edit.text()).is_dir()
         except OSError:
             valid = False
-        self.start_btn.setEnabled(valid and self._thread is None)
+        # 线程引用会话结束后保留（finished 后替换，防析构竞态），
+        # 启用与否按 isRunning 判定——按 None 判会让开始钮停止一次后永久禁用
+        busy = self._thread is not None and self._thread.isRunning()
+        self.start_btn.setEnabled(valid and not busy)
 
     def _on_start(self) -> None:
         if self._thread is not None and self._thread.isRunning():
@@ -312,6 +315,7 @@ class CameraSimulatorWindow(QMainWindow):
 
     def _set_running(self, running: bool) -> None:
         self.dir_edit.setEnabled(not running)
+        self.browse_btn.setEnabled(not running)
         self.interval_spin.setEnabled(not running)
         if running:
             self._error_label.setText("")

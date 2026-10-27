@@ -202,3 +202,47 @@ def test_window_constructs_offscreen(qapp, tmp_path):
         assert win.start_btn.isEnabled() is False
     finally:
         win.close()
+
+
+def test_window_start_stop_restart_cycle(qapp, tmp_path, monkeypatch):
+    """窗口级启停循环回归：停止完成后开始钮必须恢复（终审 Critical #1），
+    运行中浏览钮禁用（Important #2）；二段启动线程可再次运行。"""
+    from types import SimpleNamespace
+
+    from PyQt5.QtCore import QSettings
+
+    QSettings("analysis_system", "camera_simulator").clear()
+    mod = _load_module()
+    ns = rf"Local\IAP_TEST_SIM{os.getpid()}_{uuid.uuid4().hex[:6]}"
+    monkeypatch.setattr(mod, "load_ipc_config", lambda: SimpleNamespace(namespace=ns))
+    _drop_image(tmp_path, "a.png", fill=10)
+    win = mod.CameraSimulatorWindow()
+    try:
+        win.dir_edit.setText(str(tmp_path))
+        win._validate_dir()
+        win.interval_spin.setValue(50)
+        win._on_start()
+        assert win._thread is not None and win._thread.isRunning()
+        assert win.start_btn.isEnabled() is False and win.stop_btn.isEnabled() is True
+        assert win.browse_btn.isEnabled() is False, "运行中浏览钮须禁用"
+        assert _spin_until(qapp, lambda: "发送中" in win._state_label.text()), \
+            f"须进入发送态: {win._state_label.text()}"
+        win._on_stop()
+        assert _spin_until(qapp, lambda: win._thread is not None
+                           and not win._thread.isRunning()), "停止后线程须退出"
+        assert _spin_until(qapp, lambda: win.start_btn.isEnabled() is True), \
+            "停止完成后开始钮必须恢复（不得永久禁用）"
+        assert win.stop_btn.isEnabled() is False
+        # 二段启动：可再次运行并正常停止（对应指南 §8"再次开始"承诺）
+        win._on_start()
+        assert win._thread is not None and win._thread.isRunning(), "二段启动须能创建新线程"
+        assert win.start_btn.isEnabled() is False and win.stop_btn.isEnabled() is True
+        win._on_stop()
+        assert _spin_until(qapp, lambda: win._thread is not None
+                           and not win._thread.isRunning())
+        assert _spin_until(qapp, lambda: win.start_btn.isEnabled() is True)
+    finally:
+        if win._thread is not None and win._thread.isRunning():
+            win._thread.stop()
+            win._thread.wait(5000)
+        win.close()
