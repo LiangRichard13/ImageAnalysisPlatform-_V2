@@ -58,9 +58,11 @@ def test_detect_exclude_skips_inference(monkeypatch):
     assert calls["n"] == 21  # 边缘 2+2 份未推理
     # display 生效值 = max(detect, 0) = 2，与检出范围一致（k=0 不再收缩）
     assert metrics["num_crops"] == 21
-    assert metrics["crop_results"][0]["position"] == [0, 0, CROP_W, H]
-    assert metrics["original_size"] == [2100, 1000]
-    assert pred.shape == (H, 2100)
+    # 画布保持全尺寸（shm RESULT 协议要求全分辨率 pred/heat），检出窗口外置 0
+    assert metrics["crop_results"][0]["position"] == [200, 0, 300, H]
+    assert metrics["original_size"] == [W, H]
+    assert pred.shape == (H, W)
+    assert not pred[:, :200].any() and not pred[:, 2300:].any()
     assert metrics["excluded_edge_crops"] == {"detect": 2, "judge": 2, "display": 2}
 
 
@@ -87,21 +89,24 @@ def test_judge_relative_to_detect(monkeypatch):
     assert metrics["sample_score"] == pytest.approx(1.0)
     # display 生效值 = max(1, 0) = 1，与检出范围一致（rel k=0 不再收缩）
     assert metrics["num_crops"] == 23
-    assert metrics["original_size"] == [2300, 1000]
+    assert metrics["original_size"] == [W, H]
 
 
-def test_display_exclude_crops_output(monkeypatch, tmp_path):
+def test_display_exclude_zeroes_margins(monkeypatch, tmp_path):
     engine, calls = _make_engine(monkeypatch)
     pred, heat, metrics = engine.process_array(
         _strip_gray([10] * 25), image_type="very long", exclude_display_crops=3)
-    assert pred.shape == (H, 1900)
-    assert metrics["original_size"] == [1900, 1000]
+    x_lo, x_hi = 3 * CROP_W, 22 * CROP_W  # 保留区 crop3..21
+    # 画布保持全尺寸（shm RESULT 协议要求全分辨率 pred/heat），窗口外置 0
+    assert pred.shape == (H, W)
+    assert metrics["original_size"] == [W, H]
     assert metrics["num_crops"] == 19
-    assert metrics["crop_results"][0]["position"] == [0, 0, CROP_W, H]
-    assert metrics["crop_results"][-1]["position"] == [1800, 0, 1900, H]
+    assert metrics["crop_results"][0]["position"] == [x_lo, 0, x_lo + CROP_W, H]
+    assert metrics["crop_results"][-1]["position"] == [x_hi - CROP_W, 0, x_hi, H]
+    assert not pred[:, :x_lo].any() and not pred[:, x_hi:].any()
     assert metrics["excluded_edge_crops"] == {"detect": 0, "judge": 2, "display": 3}
 
-    # 落盘模式与数组模式同口径：png 宽度、JSON 字段一致
+    # 落盘模式与数组模式同口径：png 全尺寸、JSON 字段一致
     img_path = tmp_path / "frame.png"
     cv2.imwrite(str(img_path), _strip_gray([10] * 25))
     pred_path, heat_path, json_path = engine.process_to_dir(
@@ -109,7 +114,8 @@ def test_display_exclude_crops_output(monkeypatch, tmp_path):
         exclude_display_crops=3)
     import json
     got = cv2.imread(pred_path, cv2.IMREAD_GRAYSCALE)
-    assert got.shape == (H, 1900)
+    assert got.shape == (H, W)
+    assert not got[:, :x_lo].any() and not got[:, x_hi:].any()
     file_json = json.loads(Path(json_path).read_text(encoding="utf-8"))
     for key, value in metrics.items():
         if key == "timestamp":
@@ -125,7 +131,23 @@ def test_detect_and_display_combined(monkeypatch):
     assert calls["n"] == 23
     # display 生效值 = 3：k = 3-1 = 2，检出列表（crop1..23）两端再收 2 份 → crop3..21
     assert metrics["num_crops"] == 19
-    assert metrics["original_size"] == [1900, 1000]
+    assert metrics["original_size"] == [W, H]
+    assert pred.shape == (H, W)
+    assert not pred[:, :300].any() and not pred[:, 2200:].any()
+
+
+def test_display_exclude_env_full_canvas(monkeypatch):
+    # .env 部署口径（DISPLAY=2）经环境变量生效：输出仍全尺寸，
+    # write_result 形状守卫（pred.shape == frame 形状）不再丢帧
+    monkeypatch.setenv("ANOMALY_CROP_EXCLUDE_DISPLAY", "2")
+    engine, calls = _make_engine(monkeypatch)
+    pred, heat, metrics = engine.process_array(
+        _strip_gray([10] * 25), image_type="very long")
+    assert pred.shape == (H, W)
+    assert heat.shape == (H, W)
+    assert metrics["original_size"] == [W, H]
+    assert not pred[:, :200].any() and not pred[:, 2300:].any()
+    assert metrics["excluded_edge_crops"]["display"] == 2
 
 
 def test_square_ignores_exclusions(monkeypatch):

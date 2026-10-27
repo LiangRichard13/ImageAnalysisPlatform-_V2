@@ -391,11 +391,12 @@ class AnomalyProcessorService:
         judge_n: int = 0,
         display_n: int = 0,
     ) -> Dict:
-        """合并子图：判定范围/展示窗口按三级排除换算（独立计数，见 _resolve_crop_exclusions）。
+        """合并子图：判定范围/展示排除按三级排除换算（独立计数，见 _resolve_crop_exclusions）。
 
         crops_results 已是检测范围内的子图（detect 排除在切片时完成）；判定相对
-        排除数 = judge_n - detect_n；展示窗口 = 检出列表两端再各收 display_n-detect_n
-        份，像素边界取窗口边缘子图 position（兼容 fixed 尾片收窄与 adaptive 轴向）。
+        排除数 = judge_n - detect_n；展示排除 = 检出列表两端再各收 display_n-detect_n
+        份（清单口径），画布保持全尺寸、保留区外置 0——shm RESULT 协议要求
+        pred/heat 全分辨率，物理裁窄会撞 write_result 形状守卫丢帧。
         """
         width, height = original_size
         merged_anomaly_map = np.zeros((height, width), dtype=np.float32)
@@ -416,46 +417,43 @@ class AnomalyProcessorService:
             scores_for_overall = all_scores[rel_judge:-rel_judge]
         overall_score = max(scores_for_overall)
 
-        # 展示窗口：像素边界取窗口边缘子图 position
+        # 展示排除：检出列表两端再各收 display_n-detect_n 份（清单口径）；
+        # 画布保持全尺寸、窗口外置 0（物理裁窄会违反 shm RESULT 全分辨率协议；
+        # 置零须显式做——窗口外仍可能有检出子图的异常值，清零即"不展示"）
         k = display_n - detect_n
         kept = list(crops_results)
         if k > 0 and len(crops_results) > 2 * k:
             kept = kept[k:-k]
         fx1, fy1, fx2, _ = kept[0][1]
         _, ly1, lx2, ly2 = kept[-1][1]
-        vertical = fx1 == 0 and fx2 == width  # adaptive 竖图：沿 y 裁
-        if vertical:
-            lo, hi = fy1, ly2
-        else:
-            lo, hi = fx1, lx2
+        vertical = fx1 == 0 and fx2 == width  # adaptive 竖图：沿 y 置零
+        lo, hi = (fy1, ly2) if vertical else (fx1, lx2)
 
         crop_results_data = []
         for index, (result, position) in enumerate(kept):
             x1, y1, x2, y2 = position
-            if vertical:
-                out_position = (x1, y1 - lo, x2, y2 - lo)
-            else:
-                out_position = (x1 - lo, y1, x2 - lo, y2)
             crop_results_data.append(
                 {
                     "crop_id": index,
-                    "position": out_position,
+                    "position": (x1, y1, x2, y2),
                     "sample_score": result["sample_score"],
                     "anomaly_level": self._get_anomaly_level(result["sample_score"]),
                 }
             )
 
-        if lo > 0 or hi < (height if vertical else width):
-            merged_anomaly_map = (merged_anomaly_map[lo:hi, :] if vertical
-                                  else merged_anomaly_map[:, lo:hi])
+        if vertical:
+            merged_anomaly_map[:lo, :] = 0.0
+            merged_anomaly_map[hi:, :] = 0.0
+        else:
+            merged_anomaly_map[:, :lo] = 0.0
+            merged_anomaly_map[:, hi:] = 0.0
 
-        out_size = (width, hi - lo) if vertical else (hi - lo, height)
         return {
             "merged_anomaly_map": merged_anomaly_map,
             "overall_score": overall_score,
             "overall_anomaly_level": self._get_overall_anomaly_level(scores_for_overall),
             "crop_results": crop_results_data,
-            "original_size": out_size,
+            "original_size": (width, height),
             "num_crops": len(kept),
             "excluded_edge_crops": {"detect": detect_n, "judge": judge_n, "display": display_n},
         }
@@ -620,7 +618,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--exclude_display_crops",
         type=int,
         default=None,
-        help="每侧排除不出现在输出异常图/热力图（输出图裁窄）的边缘子图份数；缺省读环境变量 ANOMALY_CROP_EXCLUDE_DISPLAY，均未设置时 0",
+        help="每侧排除不出现在输出异常图/热力图（保留区外置 0）的边缘子图份数；缺省读环境变量 ANOMALY_CROP_EXCLUDE_DISPLAY，均未设置时 0",
     )
     return parser
 

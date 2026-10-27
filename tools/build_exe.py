@@ -32,7 +32,7 @@ ANOMALY_ALERT_POPUP_ENABLED=1
 ANOMALY_THRESHOLD=0.21
 # 异常检测边缘子图排除（膜面长图 25 等分，每侧排除 N 份）
 # 三值独立计数、各自从最边缘数起，生效范围取 max：
-#   判断范围=每侧 max(检测,判断) 份；展示范围=每侧 max(检测,展示) 份（输出图物理裁窄）
+#   判断范围=每侧 max(检测,判断) 份；展示范围=每侧 max(检测,展示) 份（保留区外置 0，图保持全尺寸）
 # 示例 1/2/3：每侧第 1 份不检测、前 2 份不判定、前 3 份不展示（合法范围 0-12）
 ANOMALY_CROP_EXCLUDE_DETECT=0
 ANOMALY_CROP_EXCLUDE_JUDGE=2

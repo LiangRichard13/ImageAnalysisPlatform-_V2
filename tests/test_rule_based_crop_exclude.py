@@ -1,7 +1,7 @@
 """规则引擎三级边缘子图排除（detect/judge/display）测试。
 
 H×W=1000×8000 → DISPLAY_NUM_CROPS=25、片宽 320；全幅轮廓检测，
-检测排除 = cx 段后过滤，展示排除 = 画布物理裁窄。
+检测排除 = cx 段后过滤，展示排除 = 保留区外置 0（画布保持全尺寸）。
 """
 import cv2
 import numpy as np
@@ -53,20 +53,38 @@ def test_detect_exclude_filters_wrinkles():
     assert any(abs(cx - 4000) < 60 for cx in cxs)
 
 
-def test_display_exclude_crops_output():
+def test_display_exclude_zeroes_margins():
     img = _stripe(np.full((H, W), BG, dtype=np.uint8), 4000)
     pred, heat, metrics = _pipeline().process_array(
         img, exclude_edge_crops=0, exclude_display_crops=2)
     x_lo, x_hi = 2 * CROP, min(23 * CROP, W)  # 640..7360
-    assert pred.shape == (H, x_hi - x_lo)
-    assert metrics["original_size"] == [x_hi - x_lo, H]
+    # 画布保持全尺寸（shm RESULT 协议要求全分辨率 pred/heat），保留区外置 0
+    assert pred.shape == (H, W)
+    assert heat.shape == (H, W)
+    assert metrics["original_size"] == [W, H]
+    assert not pred[:, :x_lo].any() and not pred[:, x_hi:].any()
+    assert pred[:, x_lo:x_hi].any()
     assert metrics["num_crops"] == 21
-    assert metrics["crop_results"][0]["position"] == [0, 0, CROP, H]
-    assert metrics["crop_results"][-1]["position"][2] == x_hi - x_lo
+    assert metrics["crop_results"][0]["position"] == [x_lo, 0, x_lo + CROP, H]
+    assert metrics["crop_results"][-1]["position"][2] == x_hi
     assert metrics["excluded_edge_crops"] == {"detect": 0, "judge": 0, "display": 2}
     assert metrics["sample_score"] > 0  # crop12 仍参与判定
     # wrinkles 清单保持检测范围口径，不随展示排除收缩
     assert any(abs(w["geometry"]["center_x"] - 4000) < 60 for w in metrics["wrinkles"])
+
+
+def test_display_exclude_env_full_canvas(monkeypatch):
+    # .env 部署口径（DISPLAY=2）经环境变量生效：输出仍全尺寸，
+    # write_result 形状守卫（pred.shape == frame 形状）不再丢帧
+    monkeypatch.setenv("ANOMALY_CROP_EXCLUDE_DISPLAY", "2")
+    img = _stripe(np.full((H, W), BG, dtype=np.uint8), 4000)
+    pred, heat, metrics = _pipeline().process_array(img)
+    x_lo, x_hi = 2 * CROP, min(23 * CROP, W)
+    assert pred.shape == (H, W)
+    assert heat.shape == (H, W)
+    assert metrics["original_size"] == [W, H]
+    assert not pred[:, :x_lo].any() and not pred[:, x_hi:].any()
+    assert metrics["excluded_edge_crops"]["display"] == 2
 
 
 def test_judge_exclude_via_env(monkeypatch):

@@ -540,13 +540,10 @@ class AnomalyProcessorService:
         is_square: bool,
         judge_n: int = _EXCLUDED_EDGE_CROPS,
         display_n: int = 0,
-        x_lo: int = 0,
-        x_hi: Optional[int] = None,
     ) -> str:
-        """三件套落盘。非 square 分支按三级排除的保留区口径输出（展示排除物理裁窄）；
+        """三件套落盘。非 square 分支按三级排除输出（展示排除保留区外置 0，
+        画布保持全尺寸——物理裁窄会违反 shm RESULT 全分辨率协议）；
         square 无子图概念，排除数全部忽略（判定维持现状默认剔边）。"""
-        if x_hi is None:
-            x_hi = img_width
         process_dir = self.output_dir / process_id
         process_dir.mkdir(parents=True, exist_ok=True)
 
@@ -557,8 +554,7 @@ class AnomalyProcessorService:
             if display_n > 0 and DISPLAY_NUM_CROPS - 2 * display_n > 0:
                 map_wrinkles = _filter_wrinkles_by_segments(
                     wrinkles, img_width, display_n, DISPLAY_NUM_CROPS - display_n)
-            anomaly_map = self._compose_anomaly_map(
-                (img_height, x_hi - x_lo), map_wrinkles, x_offset=x_lo)
+            anomaly_map = self._compose_anomaly_map((img_height, img_width), map_wrinkles)
 
         anomaly_map_path = process_dir / f"{process_id}.png"
         heatmap_path = process_dir / f"{process_id}_heatmap.png"
@@ -578,7 +574,7 @@ class AnomalyProcessorService:
             "sample_score": overall_score,
             "anomaly_level": self._get_anomaly_level(overall_score),
             "analog_voltage": self._calculate_analog_voltage(overall_score),
-            "original_size": [img_width, img_height] if is_square else [x_hi - x_lo, img_height],
+            "original_size": [img_width, img_height],
             "timestamp": datetime.now().isoformat(),
             "files": {
                 "anomaly_map": anomaly_map_path.name,
@@ -591,8 +587,7 @@ class AnomalyProcessorService:
             result_data["image_size"] = [img_width, img_height]
             result_data["processed_size"] = list(anomaly_map.shape)
         else:
-            crop_results = self._build_crop_results(
-                wrinkles, img_width, img_height, edge=display_n, x_offset=x_lo)
+            crop_results = self._build_crop_results(wrinkles, img_width, img_height, edge=display_n)
             result_data["num_crops"] = len(crop_results)
             result_data["crop_results"] = crop_results
             result_data["excluded_edge_crops"] = {
@@ -618,7 +613,7 @@ class AnomalyProcessorService:
         LOGGER.info("Rule-based detection: %d wrinkles found in %.1f ms", len(wrinkles), duration_ms)
 
         # 三级排除仅作用于有子图概念的非 square 图；square 忽略（判定维持现状默认）
-        judge_n, display_n, x_lo, x_hi = _EXCLUDED_EDGE_CROPS, 0, 0, img_width
+        judge_n, display_n = _EXCLUDED_EDGE_CROPS, 0
         if not is_square:
             detect_n, judge_n, display_n = _resolve_crop_exclusions(
                 self.exclude_detect_crops, self.exclude_edge_crops, self.exclude_display_crops)
@@ -626,13 +621,9 @@ class AnomalyProcessorService:
                 # 检测排除：cx 落在排除段的褶皱整条丢弃（等同该子图不产出结果）
                 wrinkles = _filter_wrinkles_by_segments(
                     wrinkles, img_width, detect_n, DISPLAY_NUM_CROPS - detect_n)
-            if display_n > 0 and DISPLAY_NUM_CROPS - 2 * display_n > 0:
-                crop_size = math.ceil(img_width / DISPLAY_NUM_CROPS)
-                x_lo = display_n * crop_size
-                x_hi = min((DISPLAY_NUM_CROPS - display_n) * crop_size, img_width)
 
         return self._save_results(process_id, img_width, img_height, wrinkles, is_square,
-                                  judge_n=judge_n, display_n=display_n, x_lo=x_lo, x_hi=x_hi)
+                                  judge_n=judge_n, display_n=display_n)
 
     def process_batch(self, batch_dir: Path) -> Dict:
         request_data = self._load_request_metadata(batch_dir)
@@ -718,7 +709,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--exclude_display_crops",
         type=int,
         default=None,
-        help="每侧排除不出现在输出异常图/热力图（输出图裁窄）的边缘子图份数；缺省读环境变量 ANOMALY_CROP_EXCLUDE_DISPLAY，均未设置时 0",
+        help="每侧排除不出现在输出异常图/热力图（保留区外置 0）的边缘子图份数；缺省读环境变量 ANOMALY_CROP_EXCLUDE_DISPLAY，均未设置时 0",
     )
     parser.add_argument(
         "--process", type=str, default=None,

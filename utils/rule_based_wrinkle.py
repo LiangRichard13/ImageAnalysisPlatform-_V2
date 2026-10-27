@@ -390,7 +390,8 @@ class RuleBasedWrinklePipeline:
         metrics 不含 process_id/files（由文件路径模式/归档 worker 补齐）。
         三排除参数 None → 环境变量/默认（独立计数，见 utils/anomaly_config.py）：
         检测排除按 cx 段后过滤（无逐子图推理）；判定走 _overall_score(edge_crops)；
-        展示排除把输出图物理裁窄到保留区，metrics 同步保留区口径。
+        展示排除把保留区外置 0（画布保持全尺寸——shm RESULT 协议要求
+        pred/heat 全分辨率，物理裁窄会撞 write_result 形状守卫丢帧）。
         """
         img_height, img_width = gray.shape[:2]
         detect_n, judge_n, display_n = resolve_crop_exclusions(
@@ -409,28 +410,24 @@ class RuleBasedWrinklePipeline:
         # 2) 总判定：cx 段是原图绝对索引，直接按判断排除数收窄
         overall_score = self._overall_score(wrinkles, img_width, edge_crops=judge_n)
 
-        # 3) 展示排除：再过滤 + 画布物理裁窄（wrinkles JSON 清单保持检测范围口径）
-        crop_size = math.ceil(img_width / DISPLAY_NUM_CROPS)
-        x_lo = display_n * crop_size
-        x_hi = min((DISPLAY_NUM_CROPS - display_n) * crop_size, img_width)
+        # 3) 展示排除：再过滤，画布保持全尺寸、保留区外置 0（wrinkles JSON
+        #    清单保持检测范围口径；物理裁窄会违反 shm RESULT 全分辨率协议）
         if display_n > 0 and DISPLAY_NUM_CROPS - 2 * display_n > 0:
             map_wrinkles = _filter_wrinkles_by_segments(
                 wrinkles, img_width, display_n, DISPLAY_NUM_CROPS - display_n)
         else:
-            x_lo, x_hi = 0, img_width
             map_wrinkles = wrinkles
 
-        anomaly_map = self._compose_anomaly_map((img_height, x_hi - x_lo), map_wrinkles, x_offset=x_lo)
+        anomaly_map = self._compose_anomaly_map((img_height, img_width), map_wrinkles)
 
-        crop_results = self._build_crop_results(
-            wrinkles, img_width, img_height, edge=display_n, x_offset=x_lo)
+        crop_results = self._build_crop_results(wrinkles, img_width, img_height, edge=display_n)
         metrics = {
             "processing_mode": "rule_based",
             "model_weight": "rule_based",
             "sample_score": overall_score,
             "anomaly_level": self._get_anomaly_level(overall_score),
             "analog_voltage": self._calculate_analog_voltage(overall_score),
-            "original_size": [x_hi - x_lo, img_height],
+            "original_size": [img_width, img_height],
             "num_crops": len(crop_results),
             "timestamp": datetime.now().isoformat(),
             "crop_results": crop_results,
