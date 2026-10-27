@@ -1,7 +1,9 @@
 r"""相机端模拟器：选文件夹 → 扫描图片 → 按间隔循环写入 FRAME ring。
 
 用法（项目根，analysis_system 环境）:
-    python tools/camera_simulator.py
+    python tools/camera_simulator.py          # GUI
+    python tools/camera_simulator.py --smoke  # 打包冒烟（无头构造窗口，SMOKE_PASS/FAILED）
+    python tools/build_camera_sim.py          # 打包 exe（onedir，不含 torch，见脚本头注释）
 
 模拟 docs/ipc/相机端接入指南.md 定义的 FRAME 生产者，供无相机/桥接进程时
 手工联调分析端/孪生端（自测配合 tools/shm_inspect.py，见指南 §8）。行为语义：
@@ -16,6 +18,7 @@ r"""相机端模拟器：选文件夹 → 扫描图片 → 按间隔循环写入
     分析端按源离线等待（utils/shm_ingest.py attach 重试）自动恢复；seq 由 CTRL 继承，
     重启自动续写不回零。
 """
+import os
 import sys
 import threading
 import time
@@ -336,7 +339,59 @@ class CameraSimulatorWindow(QMainWindow):
         event.accept()
 
 
+def _run_smoke_check() -> int:
+    """打包冒烟：核心导入 + 离屏构造窗口。windowed exe 无 stdout，
+    输出双写 exe 旁 _smoke_result.txt（main_window.py 同款约定）。"""
+    lines = []
+
+    def say(msg):
+        lines.append(msg)
+        print(msg, flush=True)
+
+    try:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        say("[SMOKE] import cv2/PyQt5/utils.ipc ...")
+        import numpy as np  # noqa: F401 - 写帧链路依赖，确认随包收集
+        from utils.ipc.layout import protocol_frame_slot_bytes
+        assert protocol_frame_slot_bytes(31901, 1000) == 37748736
+        say(f"[SMOKE] ipc slot bytes OK ({len(IMAGE_EXTS)} 图片扩展名)")
+        app = QApplication.instance() or QApplication([])
+        ui_theme.apply_theme(app)
+        win = CameraSimulatorWindow()
+        assert win.start_btn.objectName() == "primaryBtn"
+        win.close()
+        say("[SMOKE] window construct OK -> SMOKE_PASS")
+        code = 0
+    except Exception as exc:  # noqa: BLE001 - 冒烟必须报告而非崩溃
+        import traceback
+        say(f"[SMOKE] FAILED: {exc}")
+        lines.extend(traceback.format_exc().splitlines())
+        code = 1
+    try:
+        (Path(sys.executable).parent / "_smoke_result.txt").write_text(
+            "\n".join(lines), encoding="utf-8")
+    except OSError:
+        pass
+    return code
+
+
+def _setup_frozen_environment() -> None:
+    """打包(exe)运行适配：配置落 exe 旁（main_window 同款原则）。
+
+    utils/ipc/config.py 以 __file__ 回溯仓库根找 .env，冻结后指向 _internal/；
+    这里把 exe 旁 .env 预载进环境变量（dotenv 不覆盖已有 env，无副作用），
+    令 SHM_NAMESPACE 等可直接编辑 exe 旁文件生效。开发态无效果。
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    from dotenv import load_dotenv
+    load_dotenv(Path(sys.executable).resolve().parent / ".env")
+
+
 def main() -> int:
+    _setup_frozen_environment()
+    if "--smoke" in sys.argv:
+        return _run_smoke_check()
     app = QApplication(sys.argv)
     ui_theme.apply_theme(app)
     win = CameraSimulatorWindow()
