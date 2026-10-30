@@ -169,3 +169,58 @@ python tools/bench_dinomaly_time.py --image_dir "E:\TestImg\2026-09-22(14.02)" -
 # shm 模式（规则化引擎）
 python tools/bench_dinomaly_time.py --image_dir "E:\TestImg\2026-09-22(14.02)" --num 100 --seed 42 --mode shm --engine rule_based
 ```
+
+## 优化落地结果 ①③（2026-10-30，同机同图三轮均值）
+
+| 阶段 | 优化前 | ①③后 | 变化 |
+|---|---|---|---|
+| engine | 938.4 ms | **540.2 ms** | −398.2 ms |
+| ui | ≈112 ms | 95.3 ms | −17 ms |
+| **realtime** | **1050.6 ms** | **635.5 ms** | **−415.1 ms（−39.5%）** |
+
+三轮：engine 540.9 / 533.6 / 546.2；realtime 637.6 / 631.3 / 637.6 ms
+（98 张计入统计，seed=42，min 0.574 / p95 0.670 / max 0.777）。
+
+### ① `_crop_fixed` 兼容 ndarray 直入（消除 PIL 全图往返）
+
+- 原路径：`Image.fromarray(rgb)` 全图 96MB 拷贝 + `_crop_fixed` 内 `np.array(image)` 再一次
+  96MB 回拷；A/B 实测 353.8 ms → 142.3 ms，**−211.5 ms**（提案估 −30-50 ms 严重低估）。
+- 实现：`np.asanyarray` 零拷贝接收 ndarray；逐片仍 `Image.fromarray` 进原 transform 栈
+  （PIL BICUBIC 不动），`test_fixed_crop_ndarray_matches_pil_bitwise` 钉死逐片像素逐位一致。
+- 回归哨兵：`test_process_array_very_long_skips_full_pil` 白盒计数 `Image.fromarray`，
+  出现全宽调用即失败（只允许 25 次逐片调用）。
+
+### ③ merge 归一化 GPU 单趟（`_normalize_canvas_uint8`）
+
+- 原路径：`_min_max_norm` CPU 六趟全幅扫描 195.0 ms → GPU 单趟上传/归一化/下传 24.9 ms，
+  **−170.2 ms**；IEEE float32 逐元素 + uint8 截断语义与 CPU 公式一致，`np.array_equal` 逐位相同
+  （`tests/test_dinomaly_gpu_norm.py` 3 条，含 flat 画布 NaN→0 守卫与无 torch 回退）。
+- resize/merge 组装仍在 CPU：cv2 与 torch interpolate 不等价，不越 bitwise 红线。
+
+### 优化后 engine 内部拆分（单张探针，31901×1000）
+
+| 步骤 | 耗时 | 性质 |
+|---|---|---|
+| cvtColor 灰度→RGB | 25.5 ms | 内存带宽 |
+| `_crop_fixed` | 112.4 ms | 逐片 25×96MB/25 拷贝（PIL 入 transform 必需） |
+| 25× 前向（B=25 单 chunk） | 298.8 ms | GPU 计算 + transform 线程池 64 ms |
+| `_merge_crop_results` | 154.1 ms | 其中归一化 25.9 ms，其余为 25 片 resize + 画布拼装 |
+
+### ② CPU/GPU 流水线重叠：**不实施**（前提不成立）
+
+`MAX_INFERENCE_BATCH=25` 使 very long 为**单 chunk**，不存在"上一 chunk 的 CPU 侧"
+可重叠；拆 13+12 两 chunk 实测前向回归 +34~74 ms，大于可重叠上限 64 ms（transform），净收益为负。
+
+### 结论
+
+realtime 635 ms 已较 1 fps 预算（1000 ms）留出约 36% 裕量，丢帧（`dropped_by_lag`）解除。
+剩余 engine 540 ms 中约 300 ms 为 GPU 前向、约 150 ms 为 96MB 级内存拷贝（带宽下界），
+Python 层可再掘空间已降至 ~50-80 ms 量级——继续投入性价比低，判定收敛。
+
+file 模式链路（`core/anomaly/dinomaly/dinomaly_service.py` 自有裁剪副本）不在本次改动内，
+20 张回归冒烟与基线一致（infer 1037.9 / total 2261.0 ms）。
+
+```bash
+# 本次终验命令（三轮）
+python tools/bench_dinomaly_time.py --image_dir "E:\TestImg6-09-22(14.02)" --num 100 --seed 42 --mode shm
+```
