@@ -197,6 +197,23 @@ python tools/bench_dinomaly_time.py --image_dir "E:\TestImg\2026-09-22(14.02)" -
   （`tests/test_dinomaly_gpu_norm.py` 3 条，含 flat 画布 NaN→0 守卫与无 torch 回退）。
 - resize/merge 组装仍在 CPU：cv2 与 torch interpolate 不等价，不越 bitwise 红线。
 
+### 检测精度等价性验证（tools/verify_engine_opt_equiv.py）
+
+真实权重 + 20 张真实图 × 两套排除配置（生产 2/2/2 含边缘置零、基准 0/2/0），
+A 路按优化前代码顺序重放（全图 PIL + CPU 归一化），B 路走现产线 `process_array`：
+
+| 比对项 | 结果 |
+|---|---|
+| 25 片裁剪像素 / mode / 位置区间（①） | 逐位一致 |
+| merge 前画布（float32，含置零） | 逐位一致，无 NaN/Inf |
+| `anomaly_map_uint8`（③ 输出） | max\|Δ\|=0，差异像素 0 |
+| overall_score | bit 级相等 |
+| overall / 逐 crop 判定级别、分数、位置 | 全部一致 |
+
+40 次比对（20 图 × 2 配置）零差异 → **①③ 为纯拷贝/算子迁移，未触碰数值路径**。
+全链中唯一非逐位等价环节仍是既有合批推理（B=25 的 GEMM 归约顺序，见上节
+`verify_batch_equiv`：500 crops 判定 0 变化、近平局 prompt 翻转 3/500、分数抖动 ±4e-3）。
+
 ### 优化后 engine 内部拆分（单张探针，31901×1000）
 
 | 步骤 | 耗时 | 性质 |
