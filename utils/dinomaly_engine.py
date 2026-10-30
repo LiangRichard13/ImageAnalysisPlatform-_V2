@@ -189,8 +189,11 @@ class DinomalyEngine:
 
     # ---------- 裁剪与合并（与服务器版逻辑一致） ----------
 
-    def _crop_fixed(self, image: Image.Image) -> List[Tuple[Image.Image, Tuple[int, int, int, int]]]:
-        image_np = np.array(image)
+    def _crop_fixed(self, image) -> List[Tuple[Image.Image, Tuple[int, int, int, int]]]:
+        # 入参兼容 PIL Image 与 ndarray：ndarray（shm 热路径）零拷贝直入，
+        # 全图 fromarray + np.array 回拷双 96MB 实测 ~211ms 已从热路径消除；
+        # PIL 入参（file 工具链 / verify_batch_equiv）走原拷贝路径不变
+        image_np = np.asanyarray(image)
         height, width = image_np.shape[:2]
         channels = 1 if len(image_np.shape) == 2 else image_np.shape[2]
 
@@ -250,6 +253,27 @@ class DinomalyEngine:
                 crops.append((sub_image_pil, (0, y_start, width, y_end)))
 
         return crops
+
+    def _normalize_canvas_uint8(self, canvas: np.ndarray) -> np.ndarray:
+        """全画布 min-max 归一化 → uint8（bench 2026-10-16 §下一杠杆③）。
+
+        GPU 路线：128MB float32 画布上传后单趟归一化、下传 uint8——CPU 六趟
+        全幅扫描 ~195ms → GPU ~25ms（实测），逐元素 IEEE float32 与 uint8 截断
+        语义同 CPU 公式，输出逐位一致（tests/test_dinomaly_gpu_norm.py 钉死）。
+        resize/merge 组装仍在 CPU：cv2 与 torch interpolate 不等价，不越红线。
+        裸对象（无 _torch）/device=cpu 回退原 CPU 路径；flat 画布 0/0 在 CPU
+        侧 NaN→uint8 截断为全 0（实测），GPU 侧显式守卫等价。
+        """
+        torch = getattr(self, "_torch", None)
+        if torch is not None and str(getattr(self, "device", "cpu")) != "cpu":
+            g = torch.from_numpy(np.ascontiguousarray(canvas)).to(self.device)
+            a_min = g.min()
+            a_max = g.max()
+            if float(a_max - a_min) == 0.0:
+                return np.zeros(canvas.shape, dtype=np.uint8)
+            return ((g - a_min) / (a_max - a_min) * 255).to(torch.uint8).cpu().numpy()
+        normalized = _min_max_norm(canvas)
+        return (normalized * 255).astype(np.uint8)
 
     def _merge_crop_results(
         self,
@@ -317,8 +341,7 @@ class DinomalyEngine:
             merged_anomaly_map[:, :lo] = 0.0
             merged_anomaly_map[:, hi:] = 0.0
 
-        normalized = _min_max_norm(merged_anomaly_map)
-        map_uint8 = (normalized * 255).astype(np.uint8)
+        map_uint8 = self._normalize_canvas_uint8(merged_anomaly_map)
 
         return {
             "anomaly_map_uint8": map_uint8,
@@ -410,10 +433,9 @@ class DinomalyEngine:
         # cvtColor（SIMD）替代 np.repeat 逐元素复制：同环境 A/B 长条帧 engine −290ms，
         # 输出逐字节相同（R=G=B=gray）；ascontiguousarray 为未来非连续输入的零成本防御
         rgb = cv2.cvtColor(np.ascontiguousarray(gray), cv2.COLOR_GRAY2RGB)
-        image = Image.fromarray(rgb, "RGB")
 
         if image_type == "square":
-            results = self.process_pil_image(image)
+            results = self.process_pil_image(Image.fromarray(rgb, "RGB"))
             map_uint8 = (_min_max_norm(results["anomaly_map"]) * 255).astype(np.uint8)
             sample_score = results["sample_score"]
             metrics = {
@@ -428,11 +450,14 @@ class DinomalyEngine:
             return map_uint8, map_uint8, metrics
 
         if image_type == "very long":
-            crops = self._crop_fixed(image)
+            # PIL 全图往返消除（bench 2026-10-16 §下一杠杆①）：rgb ndarray 直入
+            # 裁剪，逐片 fromarray 进原 transform 栈（PIL BICUBIC 不得改 cv2），
+            # bitwise 不变；adaptive 几何仍吃 PIL，保持原路径
+            crops = self._crop_fixed(rgb)
             processing_mode = "fixed_crop"
         else:
             # 行为变更：adaptive 此前强制排除 0，现统一尊重配置值（fixed/adaptive 一致）
-            crops = self._crop_adaptive(image)
+            crops = self._crop_adaptive(Image.fromarray(rgb, "RGB"))
             processing_mode = "adaptive_crop"
 
         detect_n, judge_n, display_n = resolve_crop_exclusions(
@@ -444,7 +469,7 @@ class DinomalyEngine:
         crops_results = list(zip(self.process_pil_images([crop for crop, _ in crops]),
                                  [position for _, position in crops]))
 
-        merged = self._merge_crop_results(crops_results, image.size,
+        merged = self._merge_crop_results(crops_results, (gray.shape[1], gray.shape[0]),
                                           detect_n=detect_n, judge_n=judge_n,
                                           display_n=display_n, include_heatmap=False)
         overall_score = merged["overall_score"]
