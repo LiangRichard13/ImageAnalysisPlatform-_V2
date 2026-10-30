@@ -197,6 +197,17 @@ python tools/bench_dinomaly_time.py --image_dir "E:\TestImg\2026-09-22(14.02)" -
   （`tests/test_dinomaly_gpu_norm.py` 3 条，含 flat 画布 NaN→0 守卫与无 torch 回退）。
 - resize/merge 组装仍在 CPU：cv2 与 torch interpolate 不等价，不越 bitwise 红线。
 
+### 生产排除配置实测（detect/judge/display=4/4/4，17 子图/张）
+
+打包产物 `.env` 的实际配置（每侧不推理 4 份 → 每张前向 17 次）：
+
+| 阶段 | 两轮均值 | 说明 |
+|---|---|---|
+| decode | 45.4 ms | |
+| engine | 486.3 ms | 前向随子图数下降；归一化 + 边缘置零为 32MP 固定成本 |
+| ui | 95.4 ms | |
+| **realtime** | **581.7 ms** | 580.4 / 582.9；**1 fps 预算裕量 418 ms（42%）** |
+
 ### 检测精度等价性验证（tools/verify_engine_opt_equiv.py）
 
 真实权重 + 20 张真实图 × 两套排除配置（生产 2/2/2 含边缘置零、基准 0/2/0），
